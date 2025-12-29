@@ -13,13 +13,13 @@ from bs4 import BeautifulSoup # Import BeautifulSoup
 import urllib.parse # For resolving URLs
 
 class RAGBackend:
-    def __init__(self, doc_dir="DOCUMENTATION"):
+    def __init__(self, doc_dir):
         self.doc_dir = doc_dir
         self.vector_db = None
         self.llm_pipeline = None
         self.current_model_name = None
         # Directory where the FAISS vector DB will be persisted/loaded
-        self.vector_db_path = os.path.join(self.doc_dir, "vector_db")
+        self.vector_db_path = os.path.join(os.path.dirname(__file__), "vector_db")
         
         self.models_config = {
             "Mistral-7B (High Quality, Requires GPU/High RAM)": {

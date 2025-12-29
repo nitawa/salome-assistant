@@ -10,6 +10,16 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from rag_engine import RAGBackend
 import markdown
+import pyttsx3
+import threading
+
+# Create a single global TTS engine and a lock to prevent weakref GC
+try:
+    _GLOBAL_TTS_ENGINE = pyttsx3.init()
+except Exception:
+    _GLOBAL_TTS_ENGINE = None
+
+_TTS_LOCK = threading.Lock()
 
 class Worker(QThread):
     """Background thread to handle heavy RAG operations without freezing GUI."""
@@ -63,6 +73,34 @@ class Worker(QThread):
         except Exception as e:
             self.finished.emit(f"Error: {str(e)}")
 
+
+class TTSWorker(QThread):
+    """Background thread to run TTS so GUI stays responsive."""
+    finished = pyqtSignal()
+
+    def __init__(self, text):
+        super().__init__()
+        self.text = text
+
+    def run(self):
+        try:
+            # engine = _GLOBAL_TTS_ENGINE
+            # if engine is None:
+            #     engine = pyttsx3.init()
+            # # Prevent concurrent access to the engine and keep engine alive
+            # with _TTS_LOCK:
+             os.system("espeak-ng \"{text}\"".format(text=self.text.replace('"', '\\"')))
+                # engine.say(self.text)
+                # engine.runAndWait()
+        except Exception:
+            # don't raise in thread; just end
+            pass
+        finally:
+            try:
+                self.finished.emit()
+            except Exception:
+                pass
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -74,6 +112,7 @@ class MainWindow(QMainWindow):
             raise EnvironmentError("Critical Error: 'DOCUMENTATION_ROOT_DIR' environment variable is not set.")
         self.backend = RAGBackend(doc_dir=doc_dir)
         self.robot_icon_path = os.path.join(os.path.dirname(__file__), "salome.jpg")
+        self.last_bot_answer_text = ""
 
         # --- UI Setup ---
         self.central_widget = QWidget()
@@ -218,6 +257,11 @@ class MainWindow(QMainWindow):
         self.send_button.clicked.connect(self.handle_ask)
         self.send_button.setEnabled(False)
 
+        # Audio playback button (disabled until there's something to play)
+        self.audio_button = QPushButton("Audio")
+        self.audio_button.setEnabled(False)
+        self.audio_button.clicked.connect(self.play_audio)
+
         # Timer for elapsed 'Thinking...' shown when asking
         self._thinking_timer = QTimer(self)
         self._thinking_timer.setInterval(1000)
@@ -228,11 +272,13 @@ class MainWindow(QMainWindow):
         # Make the input field expand to fill space up to the Ask button
         input_layout.addWidget(self.input_field, 1)
         input_layout.addWidget(self.send_button)
+        input_layout.addWidget(self.audio_button)
         # Align controls to the top of the row and make Ask match input height
         input_layout.setAlignment(Qt.AlignTop)
         try:
             btn_h = self.input_field.sizeHint().height()
             self.send_button.setFixedHeight(btn_h)
+            self.audio_button.setFixedHeight(btn_h)
         except Exception:
             pass
         self.layout.addLayout(input_layout)
@@ -325,7 +371,7 @@ class MainWindow(QMainWindow):
             html_answer = parts.get('html_body', '')
         except Exception:
             # fallback to Markdown
-            html_answer = markdown.markdown(answer, extensions=['fenced_code', 'codehilite'], output_format='html5')
+            html_answer = markdown.markdown(answer, extensions=['fenced_code', 'codehilite'], output_format='html')
 
         # Add minimal inline styling for code blocks so they render nicely in QTextEdit
         html_answer = html_answer.replace('<pre><code', '<pre style="background:#f6f8fa;padding:8px;border-radius:4px;white-space:pre-wrap;"><code')
@@ -341,6 +387,12 @@ class MainWindow(QMainWindow):
             img_html = ""
 
         self.chat_display.append(f"<b>Bot ({self.backend.current_model_name}):</b> {img_html}{html_answer}")
+        # store plain text answer for TTS playback and enable audio button
+        try:
+            self.last_bot_answer_text = answer
+            self.audio_button.setEnabled(True)
+        except Exception:
+            pass
         self.chat_display.append("-" * 30)
 
     def show_help(self):
@@ -372,6 +424,25 @@ class MainWindow(QMainWindow):
         m = elapsed // 60
         s = elapsed % 60
         self.status_label.setText(f"{self._thinking_prefix} {m:02d}:{s:02d}")
+
+    def play_audio(self):
+        """Trigger TTS playback of the last bot response in background."""
+        text = getattr(self, 'last_bot_answer_text', '')
+        if not text:
+            return
+        try:
+            self.audio_button.setEnabled(False)
+            self.tts_worker = TTSWorker(text)
+            self.tts_worker.finished.connect(self._on_tts_finished)
+            self.tts_worker.start()
+        except Exception:
+            self.audio_button.setEnabled(True)
+
+    def _on_tts_finished(self):
+        try:
+            self.audio_button.setEnabled(True)
+        except Exception:
+            pass
 
     
 
