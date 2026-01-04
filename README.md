@@ -1,6 +1,7 @@
-# salome-assistant :  tested on personal laptop RAM 32 GB +  RTX 5070 8GB
+# salome-assistant :
 
-
+tested on personal laptop RAM 32 GB +  RTX 5070 8GB
+ 
 ```python
 apt install python3-venv
 apt install espeak-ng
