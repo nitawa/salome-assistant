@@ -1,4 +1,4 @@
-# salome-assistant
+# salome-assistant :  tested on personal laptop RAM 32 GB +  RTX 5070 8GB
 
 
 ```python
