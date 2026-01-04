@@ -1,4 +1,4 @@
-# salome-chatbot-plugin
+# salome-assistant
 
 
 ```python
