@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "salome-assistant"
+version = "1.0.0"
+description = "RAG-based AI assistant for the SALOME platform"
+readme = "README.md"
+license = {text = "LGPL-2.1-or-later"}
+requires-python = ">=3.9"
+dependencies = [
+    "PyQt5",
+    "langchain",
+    "langchain-community",
+    "langchain-huggingface",
+    "langchain-text-splitters",
+    "transformers",
+    "sentence-transformers",
+    "faiss-cpu",
+    "beautifulsoup4",
+    "torch",
+    "accelerate",
+    "lxml",
+    "protobuf",
+    "sentencepiece",
+    "huggingface_hub",
+    "markdown",
+    "docutils",
+    "pyttsx3",
+]
+
+[project.scripts]
+salome-assistant = "salome_assistant_run:main"
+
+# ---------------------------------------------------------------------------
+# Isolation from SALOME's embedded Python
+# ---------------------------------------------------------------------------
+# SALOME ships its own Python interpreter and libraries (PyQt5, etc.).
+# To avoid any conflict, salome-assistant MUST be installed in a dedicated
+# virtual environment that is completely independent of SALOME's Python.
+#
+# Recommended installation (run outside of SALOME's environment):
+#
+#   python3 -m venv /opt/salome-assistant-venv        # or any path you choose
+#   /opt/salome-assistant-venv/bin/pip install .
+#
+# Then set the environment variable so that SALOME's GUI can find the launcher:
+#
+#   export SALOME_ASSISTANT=/opt/salome-assistant-venv/bin/salome-assistant
+#
+# The SALOME_ASSISTANT variable is also used by the SALOME GUI plugin manager
+# to add the "SALOME Assistant" entry to the Plugins menu automatically.
+# ---------------------------------------------------------------------------
+
+[tool.setuptools]
+py-modules = ["salomeAssistant", "rag_engine", "salome_assistant_run"]
+
+[tool.setuptools.package-data]
+"*" = ["salome.jpg"]
