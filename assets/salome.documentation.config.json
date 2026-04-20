@@ -1,0 +1,43 @@
+{
+    "project_name": "SALOME",
+    "_comment_project_name": "No spaces — used as ChromaDB collection name. Use underscores.",
+    "output_dir": "$SALOME_ASSISTANT_ROOT_DIR/SALOME_docs_extracted",
+    "use_token_chunking": false,
+    "_comment_token_chunking": "Token chunking is more precise but MUCH slower (use false for large datasets)",
+    "modules": {
+        "SHAPER": {
+            "description": "SHAPER parametric CAD",
+            "dev_path" : "$DOCUMENTATION_ROOT_DIR/share/doc/salome/dev/SHAPER",
+            "user_path": "$DOCUMENTATION_ROOT_DIR/share/doc/salome/gui/SHAPER"
+        },
+        "GEOM": {
+            "description": "GEOM CAD",
+            "dev_path" : "$DOCUMENTATION_ROOT_DIR/share/doc/salome/dev/GEOM",
+            "user_path": "$DOCUMENTATION_ROOT_DIR/share/doc/salome/gui/GEOM"
+        },
+        "SMESH": {
+            "description": "SMESH",
+            "dev_path" : "$DOCUMENTATION_ROOT_DIR/share/doc/salome/dev/SMESH",
+            "user_path": "$DOCUMENTATION_ROOT_DIR/share/doc/salome/gui/SMESH"
+        }
+    },    
+    "embedding": {
+        "model": "all-MiniLM-L6-v2",
+        "type": "local",
+        "_comment_type": "'local' uses sentence-transformers locally. 'api' uses an OpenAI-compatible embeddings endpoint.",
+        "base_url": null,
+        "api_key": null,
+        "_comment": "Must match exactly the embedding config in chatbot/config.json — mismatch causes silent wrong retrieval"
+    },
+    "chunking": {
+        "max_tokens": 384,
+        "overlap_tokens": 50,
+        "char_chunk_size": 1000,
+        "char_overlap": 200
+    },
+    "quality": {
+        "min_score": 0.3,
+        "min_word_count": 50,
+        "substantial_word_count": 100
+    }
+}
