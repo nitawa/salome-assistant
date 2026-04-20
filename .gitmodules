@@ -1,0 +1,3 @@
+[submodule "raglib"]
+	path = raglib
+	url = https://gitlab.deeplab.intra.cea.fr/jh281314/rag_and_chatbot.git
