@@ -23,8 +23,15 @@ dependencies = [
     "langchain-huggingface",
     "chromadb",
     "sentence-transformers",
-    # extraction pipeline (raglib/extraction/process_docs.py)
+    "rank_bm25",
+    "smolagents",
+    "pyyaml",
+    # extraction pipeline (raglib/extraction/process_docs.py). Also required
+    # unconditionally at import time: raglib/chatbot/core/agentic_chatbot.py
+    # imports raglib/extraction/html_parser.py at module load, even when
+    # agentic mode is off.
     "beautifulsoup4",
+    "markdownify",
     "transformers",
     "torch",
 ]

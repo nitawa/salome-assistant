@@ -203,15 +203,13 @@ class ConfigDialog(QDialog):
             str(raw.get("agentic", {}).get("page_index_path", "")) if isinstance(raw.get("agentic"), dict)
             else "./salome_docs_extracted/page_index.json")
         self.agentic_max_chars = self._spin(500, 50000, ag.max_chars_per_page if ag else 8000, step=500)
-        self.agentic_pages_r1 = self._spin(1, 20, ag.max_pages_per_round if ag else 3)
-        self.agentic_pages_r2 = self._spin(1, 20, ag.max_pages_round2 if ag else 2)
+        self.agentic_max_steps = self._spin(1, 20, ag.max_steps if ag else 6)
         agf.addRow("", self.agentic_enable)
         agf.addRow("page_index.json:", self.agentic_page_index)
         agf.addRow("max_chars_per_page:", self.agentic_max_chars)
-        agf.addRow("max_pages_per_round:", self.agentic_pages_r1)
-        agf.addRow("max_pages_round2:", self.agentic_pages_r2)
+        agf.addRow("max_steps:", self.agentic_max_steps)
         self._agentic_fields = [self.agentic_page_index, self.agentic_max_chars,
-                                self.agentic_pages_r1, self.agentic_pages_r2]
+                                self.agentic_max_steps]
         self.agentic_enable.toggled.connect(
             lambda on: [w.setEnabled(on) for w in self._agentic_fields])
         for w in self._agentic_fields:
@@ -332,8 +330,7 @@ class ConfigDialog(QDialog):
             data["agentic"] = {
                 "page_index_path": self.agentic_page_index.text().strip(),
                 "max_chars_per_page": self.agentic_max_chars.value(),
-                "max_pages_per_round": self.agentic_pages_r1.value(),
-                "max_pages_round2": self.agentic_pages_r2.value(),
+                "max_steps": self.agentic_max_steps.value(),
             }
         else:
             data["agentic"] = None
@@ -485,26 +482,18 @@ class MainWindow(QMainWindow):
         left_panel.addWidget(self.rag_group)
 
         # --- Agentic parameters --------------------------------------------
+        # Only max_steps is a real per-query override in raglib's
+        # AgenticChatbot.ask(); max_chars_per_page is baked into the agent's
+        # tools at Connect time (see ConfigDialog's Agentic tab to change it).
         self.agentic_group = QGroupBox("Agentic parameters")
         agentic_form = QFormLayout()
         ag = cfg.agentic
 
-        self.max_chars_input = QSpinBox()
-        self.max_chars_input.setRange(1000, 20000)
-        self.max_chars_input.setSingleStep(1000)
-        self.max_chars_input.setValue(ag.max_chars_per_page if ag else 8000)
+        self.max_steps_input = QSpinBox()
+        self.max_steps_input.setRange(1, 20)
+        self.max_steps_input.setValue(ag.max_steps if ag else 6)
 
-        self.pages_r1_input = QSpinBox()
-        self.pages_r1_input.setRange(1, 10)
-        self.pages_r1_input.setValue(ag.max_pages_per_round if ag else 3)
-
-        self.pages_r2_input = QSpinBox()
-        self.pages_r2_input.setRange(1, 10)
-        self.pages_r2_input.setValue(ag.max_pages_round2 if ag else 2)
-
-        agentic_form.addRow("Max chars / page:", self.max_chars_input)
-        agentic_form.addRow("Pages (round 1):", self.pages_r1_input)
-        agentic_form.addRow("Pages (round 2):", self.pages_r2_input)
+        agentic_form.addRow("Max steps:", self.max_steps_input)
         self.agentic_group.setLayout(agentic_form)
         left_panel.addWidget(self.agentic_group)
 
@@ -649,9 +638,7 @@ class MainWindow(QMainWindow):
         self.top_n_input.setValue(cfg.top_n_after_rerank)
         self.max_tokens_input.setValue(cfg.max_tokens)
         if cfg.agentic:
-            self.max_chars_input.setValue(cfg.agentic.max_chars_per_page)
-            self.pages_r1_input.setValue(cfg.agentic.max_pages_per_round)
-            self.pages_r2_input.setValue(cfg.agentic.max_pages_round2)
+            self.max_steps_input.setValue(cfg.agentic.max_steps)
         self.module_selector.clear()
         self.module_selector.addItem("All")
         self.reranker_checkbox.setEnabled(False)
@@ -743,9 +730,7 @@ class MainWindow(QMainWindow):
             })
         else:
             params.update({
-                'max_chars_per_page': self.max_chars_input.value(),
-                'max_pages_per_round': self.pages_r1_input.value(),
-                'max_pages_round2': self.pages_r2_input.value(),
+                'max_steps': self.max_steps_input.value(),
             })
 
         self.worker = Worker(self.backend, 'query', params=params)

@@ -31,7 +31,7 @@
   "_comment_reranker": "Set to null to disable. Enable with {\"model\": \"BAAI/bge-reranker-v2-m3\", \"type\": \"local\"} (requires sentence-transformers).",
 
   "agentic": null,
-  "_comment_agentic": "Set to null to disable the Agentic mode. Enable with {\"page_index_path\": \"./salome_docs_extracted/page_index.json\", \"max_chars_per_page\": 8000, \"max_pages_per_round\": 3, \"max_pages_round2\": 2}.",
+  "_comment_agentic": "Set to null to disable the Agentic mode. Enable with {\"page_index_path\": \"./salome_docs_extracted/page_index.json\", \"max_chars_per_page\": 8000, \"max_steps\": 6}. Requires the 'smolagents' package.",
 
   "k_standard": 40,
   "k_deep_dive": 60,
@@ -50,12 +50,55 @@
   "use_token_chunking": false,
   "_comment_token_chunking": "Token chunking is more precise but MUCH slower; use false for large doc sets.",
 
+  "_comment_modules": "dev_path = API reference (Doxygen, share/doc/salome/tui/<MODULE>) · user_path = user guide (Sphinx, share/doc/salome/gui/<MODULE>). Both optional per module. Paths may use SALOME's own $<MODULE>_ROOT_DIR / $DOCUMENTATION_ROOT_DIR environment variables (see env_launch.sh) — these are set whenever the assistant is launched from the SALOME Plugins menu, so the config stays correct regardless of where config.json itself is saved. Plain relative paths (resolved against this config file's directory) and absolute paths still work too.",
+  "_comment_modules_citation": "url_for_sources_citation turns each retrieved chunk into a clickable link to the public docs (https://docs.salome-platform.org/latest/...), which mirrors the same tui/gui/<MODULE> layout as the local build. It may be a single string, or — as used below for dev+user modules — a {\"dev\": ..., \"user\": ...} mapping so each doc_category cites its own online tree instead of the dev URL being reused for user pages. Verified live against docs.salome-platform.org/latest. IMPORTANT: keys directly under \"modules\" must each be a module dict — process_docs.py iterates every one of them as such, so no _comment* key belongs inside \"modules\" itself (only inside an individual module's dict, which is fine).",
+
   "modules": {
-    "EXAMPLE_MODULE": {
-      "description": "What this module documents",
-      "dev_path" : "../../INSTALL/DOCUMENTATION/share/doc/salome",
-      "user_path": "../../INSTALL/DOCUMENTATION/share/doc/salome",
-      "_comment": "dev_path = API reference (Doxygen html/) · user_path = tutorials/guides (Sphinx _build/html/). Both optional per module. Paths are relative to this config file's directory. EDIT these to point at the real SALOME documentation, then click 'Build index'."
+    "GEOM": {
+      "description": "Geometry module — CAD construction and manipulation.",
+      "dev_path": "$DOCUMENTATION_ROOT_DIR/share/doc/salome/tui/GEOM",
+      "user_path": "$DOCUMENTATION_ROOT_DIR/share/doc/salome/gui/GEOM",
+      "url_for_sources_citation": {
+        "dev": "https://docs.salome-platform.org/latest/tui/GEOM",
+        "user": "https://docs.salome-platform.org/latest/gui/GEOM"
+      }
+    },
+    "SHAPER": {
+      "description": "Shaper — parametric, feature-based CAD modeler.",
+      "dev_path": "$DOCUMENTATION_ROOT_DIR/share/doc/salome/tui/SHAPER",
+      "user_path": "$DOCUMENTATION_ROOT_DIR/share/doc/salome/gui/SHAPER",
+      "url_for_sources_citation": {
+        "dev": "https://docs.salome-platform.org/latest/tui/SHAPER",
+        "user": "https://docs.salome-platform.org/latest/gui/SHAPER"
+      }
+    },
+    "SMESH": {
+      "description": "Mesh module — meshing algorithms and mesh editing.",
+      "dev_path": "$DOCUMENTATION_ROOT_DIR/share/doc/salome/tui/SMESH",
+      "_comment_user_path": "share/doc/salome/gui/<MODULE> is a symlink into $<MODULE>_ROOT_DIR itself, so $SMESH_ROOT_DIR/share/doc/salome/gui/SMESH resolves to the exact same files — either form works.",
+      "user_path": "$SMESH_ROOT_DIR/share/doc/salome/gui/SMESH",
+      "url_for_sources_citation": {
+        "dev": "https://docs.salome-platform.org/latest/tui/SMESH",
+        "user": "https://docs.salome-platform.org/latest/gui/SMESH"
+      }
+    },
+    "NETGENPLUGIN": {
+      "description": "NETGEN meshing algorithm plugin for SMESH.",
+      "_comment": "No Doxygen (tui/) API reference is built for this plugin — user_path only.",
+      "user_path": "$DOCUMENTATION_ROOT_DIR/share/doc/salome/gui/NETGENPLUGIN",
+      "url_for_sources_citation": "https://docs.salome-platform.org/latest/gui/NETGENPLUGIN"
+    },
+    "GMSHPLUGIN": {
+      "description": "Gmsh meshing algorithm plugin for SMESH.",
+      "_comment": "No Doxygen (tui/) API reference is built for this plugin — user_path only.",
+      "user_path": "$DOCUMENTATION_ROOT_DIR/share/doc/salome/gui/GMSHPLUGIN",
+      "url_for_sources_citation": "https://docs.salome-platform.org/latest/gui/GMSHPLUGIN"
+    },
+    "DOCUMENTATION": {
+      "description": "General SALOME platform documentation — installation, concepts, cross-module index.",
+      "_comment": "The platform-wide docs have no per-module API reference — user_path only.",
+      "user_path": "$DOCUMENTATION_ROOT_DIR/share/doc/salome/main",
+      "url_for_sources_citation": "https://docs.salome-platform.org/latest/main"
     }
   },
 
