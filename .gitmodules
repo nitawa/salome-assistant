@@ -1,0 +1,3 @@
+[submodule "raglib"]
+	path = raglib
+	url = https://github.com/bauj/rag_and_chatbot.git
