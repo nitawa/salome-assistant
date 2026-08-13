@@ -1,18 +1,19 @@
+# --- PyQt5 GUI ---
 PyQt5
-langchain
-langchain-community
-langchain-huggingface
-langchain-text-splitters
-transformers
-sentence-transformers
-faiss-cpu
-beautifulsoup4
-torch
-accelerate
-lxml
-protobuf
-sentencepiece
-huggingface_hub
 markdown
 docutils
 pyttsx3
+
+# --- raglib documentation chatbot (RAG + Agentic) ---
+# The LLM is reached over an OpenAI-compatible HTTP endpoint (no local model load).
+langchain-core
+langchain-chroma
+langchain-openai
+langchain-huggingface
+chromadb
+sentence-transformers
+
+# --- extraction pipeline (raglib/extraction/process_docs.py) ---
+beautifulsoup4
+transformers
+torch
