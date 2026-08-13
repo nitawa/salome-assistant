@@ -1,0 +1,74 @@
+{
+  "_comment": "Single merged config for the SALOME Assistant. It feeds BOTH the chatbot (query time) and the extraction pipeline (index build time). Chatbot-only keys are ignored by the extractor; extraction-only keys (output_dir, use_token_chunking, modules, chunking, quality) are ignored by the chatbot.",
+
+  "project_name": "salome",
+  "_comment_project_name": "No spaces — used as the ChromaDB collection name.",
+
+  "embedding": {
+    "model": "all-MiniLM-L6-v2",
+    "type": "local",
+    "_comment_type": "'local' uses sentence-transformers locally; 'api' uses an OpenAI-compatible embeddings endpoint.",
+    "base_url": null,
+    "api_key": null,
+    "_comment_match": "SHARED by extraction and chatbot — must stay identical between an index and the chatbot that queries it, or retrieval silently returns wrong results."
+  },
+
+  "_comment_chatbot_section": "===== Chatbot (query time) =====",
+
+  "chromadb_path": "./salome_docs_extracted/chromadb",
+  "_comment_chromadb_path": "Relative paths are resolved against this config file's directory. Must point inside the extraction output_dir.",
+
+  "llm": {
+    "base_url": "http://localhost:11434/v1",
+    "_comment_base_url": "OpenAI-compatible endpoint. Ollama: http://localhost:11434/v1 · llama.cpp/vLLM: http://localhost:8080/v1 · OpenAI: https://api.openai.com/v1",
+    "model": "mistral",
+    "api_key": "dummy",
+    "_comment_api_key": "Use 'dummy' for local servers; your real key for hosted providers.",
+    "ssl_cert_file": null
+  },
+
+  "reranker": null,
+  "_comment_reranker": "Set to null to disable. Enable with {\"model\": \"BAAI/bge-reranker-v2-m3\", \"type\": \"local\"} (requires sentence-transformers).",
+
+  "agentic": null,
+  "_comment_agentic": "Set to null to disable the Agentic mode. Enable with {\"page_index_path\": \"./salome_docs_extracted/page_index.json\", \"max_chars_per_page\": 8000, \"max_pages_per_round\": 3, \"max_pages_round2\": 2}.",
+
+  "k_standard": 40,
+  "k_deep_dive": 60,
+  "deep_dive_batch_size": 10,
+  "top_n_after_rerank": 15,
+
+  "temperature": 0.0,
+  "max_tokens": 2000,
+  "_comment_max_tokens": "LLM answer length (chatbot). Distinct from chunking.max_tokens below (extraction chunk size).",
+
+  "_comment_extraction_section": "===== Extraction pipeline (index build time, used by the 'Build index' button) =====",
+
+  "output_dir": "./salome_docs_extracted",
+  "_comment_output_dir": "Where ChromaDB + page_index.json are written. chromadb_path above must be output_dir + '/chromadb'.",
+
+  "use_token_chunking": false,
+  "_comment_token_chunking": "Token chunking is more precise but MUCH slower; use false for large doc sets.",
+
+  "modules": {
+    "EXAMPLE_MODULE": {
+      "description": "What this module documents",
+      "dev_path" : "../../INSTALL/DOCUMENTATION/share/doc/salome",
+      "user_path": "../../INSTALL/DOCUMENTATION/share/doc/salome",
+      "_comment": "dev_path = API reference (Doxygen html/) · user_path = tutorials/guides (Sphinx _build/html/). Both optional per module. Paths are relative to this config file's directory. EDIT these to point at the real SALOME documentation, then click 'Build index'."
+    }
+  },
+
+  "chunking": {
+    "max_tokens": 384,
+    "overlap_tokens": 50,
+    "char_chunk_size": 1000,
+    "char_overlap": 200
+  },
+
+  "quality": {
+    "min_score": 0.3,
+    "min_word_count": 50,
+    "substantial_word_count": 100
+  }
+}
