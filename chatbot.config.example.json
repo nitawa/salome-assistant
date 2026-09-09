@@ -1,0 +1,127 @@
+{
+  "_comment": "Single config for the SALOME Assistant, split into the two sections raglib itself keeps separate: 'chatbot' (query time, loaded via raglib's ChatbotConfig.load()) and 'extraction' (index build time, consumed by process_docs.py). Each section follows exactly raglib's own config.json schema for that stage — see raglib/README.md's 'Chatbot Config' / 'Extraction Config' sections.",
+
+  "chatbot": {
+    "project_name": "salome",
+    "_comment_project_name": "No spaces — used as the ChromaDB collection name. Must match extraction.project_name.",
+
+    "chromadb_path": "./salome_docs_extracted/chromadb",
+    "_comment_chromadb_path": "Relative paths are resolved against this config file's directory. Must point inside extraction.output_dir.",
+
+    "llm": {
+      "base_url": "http://localhost:11434/v1",
+      "_comment_base_url": "OpenAI-compatible endpoint. Ollama: http://localhost:11434/v1 · llama.cpp/vLLM: http://localhost:8080/v1 · OpenAI: https://api.openai.com/v1",
+      "model": "mistral",
+      "api_key": "dummy",
+      "_comment_api_key": "Use 'dummy' for local servers; your real key for hosted providers.",
+      "ssl_cert_file": null,
+      "timeout": null,
+      "_comment_timeout": "Seconds to wait for the LLM endpoint before raising a (catchable) timeout error. null = openai-python's own default (600s). Raise this (e.g. 300-900) for a local model on modest hardware or for Deep Dive/Agentic mode, which chain several LLM calls; a fast hosted API rarely needs it changed."
+    },
+
+    "embedding": {
+      "model": "all-MiniLM-L6-v2",
+      "type": "local",
+      "_comment_type": "'local' uses sentence-transformers locally; 'api' uses an OpenAI-compatible embeddings endpoint.",
+      "base_url": null,
+      "api_key": null,
+      "_comment_match": "Must stay identical to extraction.embedding — mismatch causes retrieval to silently return wrong results."
+    },
+
+    "reranker": {
+      "model": "answerdotai/answerai-colbert-small-v1",
+      "type": "late_interaction"
+    },
+    "_comment_reranker": "Set to null to disable. Enable with: {\"model\": \"BAAI/bge-reranker-v2-m3\", \"type\": \"cross_encoder\"}. Requires sentence-transformers. type: \"late_interaction\" (e.g. {\"model\": \"answerdotai/answerai-colbert-small-v1\", \"type\": \"late_interaction\"}) uses ColBERT-style MaxSim scoring via sentence_transformers.MultiVectorEncoder instead of a cross-encoder — requires sentence-transformers >= 6.0. Only one method runs at a time.",
+
+    "agentic": {
+      "page_index_path": "./salome_docs_extracted/page_index.json",
+      "max_chars_per_page": 8000,
+      "max_steps": 20,
+      "debug": false,
+      "section_top_n": 5,
+      "section_char_budget": 15000
+    },
+    "_comment_agentic": "Set to null to disable. Enable with: {\"page_index_path\": \"./salome_docs_extracted/page_index.json\", \"max_chars_per_page\": 8000, \"max_steps\": 20, \"debug\": false, \"section_top_n\": 5, \"section_char_budget\": 15000}. page_index_path is produced by extraction (see extraction.output_dir) — requires re-running extraction to generate it, plus the 'deepagents' package. A deepagents agent decides for itself how many search/read cycles to run, bounded by max_steps (mapped to LangGraph's recursion_limit). search_sections_tool returns up to section_top_n reconstructed sections per call, sharing section_char_budget characters; read_page_tool (whole-page, capped at max_chars_per_page) stays as an escape hatch. debug: true dumps each run's trace as JSON under debug_traces/ (relative to cwd), for troubleshooting.",
+
+    "k_standard": 40,
+    "k_deep_dive": 60,
+    "k_retrieve": null,
+    "_comment_k_retrieve": "Per-channel retrieval depth: how many candidates each channel (dense vector search, BM25) fetches BEFORE fusion, decoupled from the reranker pool size (k_standard/k_deep_dive). Reciprocal Rank Fusion truncates its merged output back to the pool size, so when this is null each channel effectively contributes only ~half its candidates. Setting it deeper than the pool (e.g. 80 vs a 40 pool) widens recall without growing reranker cost, which tracks pool size. null = per-channel depth equals the pool size.",
+    "deep_dive_batch_size": 10,
+    "top_n_after_rerank": 15,
+    "_comment_top_n": "Docs kept after cross-encoder reranking. Only used when reranker is enabled.",
+    "expansion_char_budget": 60000,
+    "_comment_expansion_char_budget": "Total characters parent-section expansion may add across all surviving docs. Each survivor is expanded from the chunk that was retrieved to the full text of its section, rebuilt from the corpus JSONL (uncapped). This budget stops one very large page from crowding the context window; sections that no longer fit are left as the retrieved chunk.",
+
+    "temperature": 0.0,
+    "max_tokens": 5000,
+    "_comment_max_tokens": "LLM answer length. Distinct from extraction.chunking.max_tokens (extraction chunk size).",
+
+    "bm25_enabled": true,
+    "_comment_bm25_enabled": "BM25 keyword search fused with vector search via Reciprocal Rank Fusion. Requires <project_name>_docs.jsonl next to chromadb_path (produced by extraction); if that file is missing the chatbot warns at startup and falls back to pure vector search. Set false to A/B against pure vector search.",
+
+    "title_boost_enabled": true,
+    "_comment_title_boost_enabled": "Third RRF list: BM25 over chunk TITLES only, collapsed to one hit per page. A question naming a class or identifier is an entity lookup — that token is one of many in a chunk body but the whole of a page's title, so this channel is far more precise for 'what does X do' questions than body BM25 or dense search. Requires bm25_enabled. Set false if your pages have uniform or repeated titles, where it degrades to injecting arbitrary pages into the rerank pool.",
+
+    "hyde_enabled": false,
+    "_comment_hyde_enabled": "Opt-in HyDE: before vector search, an LLM writes a short hypothetical documentation passage and that passage (not the literal question) is embedded and searched. Helps when questions are phrased very differently from the docs. BM25 and reranking still use the real question. Costs one extra LLM call per question."
+  },
+
+  "extraction": {
+    "project_name": "salome",
+    "_comment_project_name": "No spaces — used as the ChromaDB collection name. Must match chatbot.project_name.",
+
+    "output_dir": "./salome_docs_extracted",
+    "_comment_output_dir": "Where ChromaDB + page_index.json are written. chatbot.chromadb_path must point to output_dir + '/chromadb'.",
+
+    "use_token_chunking": false,
+    "_comment_token_chunking": "Token chunking is more precise but MUCH slower; use false for large doc sets.",
+
+    "embedding": {
+      "model": "all-MiniLM-L6-v2",
+      "type": "local",
+      "_comment_type": "'local' uses sentence-transformers locally; 'api' uses an OpenAI-compatible embeddings endpoint.",
+      "base_url": null,
+      "api_key": null,
+      "_comment_match": "Must stay identical to chatbot.embedding — mismatch causes retrieval to silently return wrong results."
+    },
+
+    "_comment_modules": "dev_path = API reference (Doxygen, share/doc/salome/tui/<MODULE>) · user_path = user guide (Sphinx, share/doc/salome/gui/<MODULE>). Both optional per module. Paths may use SALOME's own $<MODULE>_ROOT_DIR / $DOCUMENTATION_ROOT_DIR environment variables (see env_launch.sh) — these are set whenever the assistant is launched from the SALOME Plugins menu, so the config stays correct regardless of where config.json itself is saved. Plain relative paths (resolved against this config file's directory) and absolute paths still work too.",
+    "_comment_modules_citation": "url_for_sources_citation turns each retrieved chunk into a clickable link to the public docs (https://docs.salome-platform.org/latest/...), which mirrors the same tui/gui/<MODULE> layout as the local build. It may be a single string, or — as used below for dev+user modules — a {\"dev\": ..., \"user\": ...} mapping so each doc_category cites its own online tree instead of the dev URL being reused for user pages. Verified live against docs.salome-platform.org/latest. IMPORTANT: keys directly under \"modules\" must each be a module dict — process_docs.py iterates every one of them as such, so no _comment* key belongs inside \"modules\" itself (only inside an individual module's dict, which is fine).",
+
+    "modules": {
+      "GEOM": {
+        "description": "Geometry module \u2014 CAD construction and manipulation.",
+        "dev_path": "$GEOM_ROOT_DIR/share/doc/salome/tui/GEOM",
+        "user_path": "$GEOM_ROOT_DIR/share/doc/salome/gui/GEOM",
+        "url_for_sources_citation": "https://docs.salome-platform.org/latest/tui/GEOM"
+      },
+      "SHAPER": {
+        "description": "Shaper \u2014 parametric, feature-based CAD modeler.",
+        "dev_path": "$SHAPER_ROOT_DIR/share/doc/salome/tui/SHAPER",
+        "user_path": "$SHAPER_ROOT_DIR/share/doc/salome/gui/SHAPER",
+        "url_for_sources_citation": "https://docs.salome-platform.org/latest/gui/SHAPER"
+      },
+      "SMESH": {
+        "description": "Mesh module \u2014 meshing algorithms and mesh editing.",
+        "dev_path": "$SMESH_ROOT_DIR/share/doc/salome/tui/SMESH",
+        "user_path": "$SMESH_ROOT_DIR/share/doc/salome/gui/SMESH",
+        "url_for_sources_citation": "https://docs.salome-platform.org/latest/tui/SMESH"
+      }
+    },
+
+    "chunking": {
+      "max_tokens": 384,
+      "overlap_tokens": 50,
+      "char_chunk_size": 1000,
+      "char_overlap": 200
+    },
+
+    "quality": {
+      "min_score": 0.3,
+      "min_word_count": 50,
+      "substantial_word_count": 100
+    }
+  }
+}

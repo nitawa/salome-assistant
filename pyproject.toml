@@ -8,32 +8,43 @@ version = "1.0.0"
 description = "RAG-based AI assistant for the SALOME platform"
 readme = "README.md"
 license = {text = "LGPL-2.1-or-later"}
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
-    # PyQt5 GUI
+    # PyQt5 GUI (not a raglib dependency — no fixed version to mirror)
     "PyQt5",
+    "PyQtWebEngine",
     "markdown",
-    "docutils",
-    "pyttsx3",
+    "pyyaml",
+    # CPU-only torch, pinned to match raglib/requirements.txt exactly. The
+    # '+cpu' local version is only on PyTorch's own index, not PyPI — `pip
+    # install .` needs --extra-index-url https://download.pytorch.org/whl/cpu
+    # (e.g. via PIP_EXTRA_INDEX_URL or pip.conf) or this pin will fail to
+    # resolve. See requirements.txt for the manual-install equivalent.
+    "torch==2.11.0+cpu",
     # raglib documentation chatbot (RAG + Agentic). The LLM is reached over an
     # OpenAI-compatible HTTP endpoint, so no local model-loading deps are needed.
-    "langchain-core",
-    "langchain-chroma",
-    "langchain-openai",
-    "langchain-huggingface",
-    "chromadb",
-    "sentence-transformers",
-    "rank_bm25",
-    "smolagents",
-    "pyyaml",
+    # Versions pinned to match raglib/requirements.txt.
+    "langchain-core==1.6.0",
+    "langchain-chroma==1.1.0",
+    "langchain-openai==1.1.12",
+    "langchain-huggingface==1.2.1",
+    "chromadb==1.5.5",
+    "sentence-transformers==6.0.0",
+    "rank_bm25==0.2.2",
+    "deepagents==0.7.8",
+    "langgraph==1.2.11",
     # extraction pipeline (raglib/extraction/process_docs.py). Also required
     # unconditionally at import time: raglib/chatbot/core/agentic_chatbot.py
     # imports raglib/extraction/html_parser.py at module load, even when
     # agentic mode is off.
-    "beautifulsoup4",
-    "markdownify",
-    "transformers",
-    "torch",
+    "beautifulsoup4==4.14.3",
+    "markdownify==1.2.3",
+    "transformers==5.3.0",
+    # benchmark & evaluation (raglib/evaluator/)
+    "matplotlib==3.8.4",
+    "optuna==4.9.0",
+    # testing (raglib/tests, raglib/chatbot/tests)
+    "pytest==7.4.4",
 ]
 
 [project.scripts]
@@ -60,7 +71,7 @@ salome-assistant = "salome_assistant_run:main"
 # ---------------------------------------------------------------------------
 
 [tool.setuptools]
-py-modules = ["salomeAssistant", "rag_engine", "salome_assistant_run"]
+py-modules = ["salomeAssistant", "rag_engine", "salome_assistant_run", "salome_mcp_client"]
 
 [tool.setuptools.package-data]
 "*" = ["salome.jpg"]

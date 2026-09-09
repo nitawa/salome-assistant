@@ -19,8 +19,22 @@
 """
 RAGBackend — adapts the `raglib` documentation chatbot (git submodule, a
 standalone RAG/Agentic project) to the API salomeAssistant.py's PyQt5 GUI
-expects: a single merged config.json driving both retrieval and the
-extraction pipeline, connect/ask/build-index actions, and an editable config.
+expects: connect/ask/build-index actions, and an editable configuration.
+
+raglib's own README distinguishes two independent stages, each with its own
+native config.json: extraction (`extraction/config.json`, consumed by
+`process_docs.py`) and the chatbot (`chatbot/config.json`, consumed by
+`chatbot.py` / `core.ChatbotConfig`). RAGBackend keeps a single config.json
+on disk for SALOME Assistant, split into two top-level sections —
+`{"chatbot": {...}, "extraction": {...}}` — one holding exactly raglib's
+chatbot config.json schema, the other exactly its extraction config.json
+schema. Connect and Ask go through exactly the calls documented in raglib's
+README ("Python API" section):
+
+    from core import ChatbotConfig, DocumentationChatbot, AgenticChatbot
+    config = ChatbotConfig.load("config.json")
+    chatbot = DocumentationChatbot(config)
+    result = chatbot.ask("...")
 
 `raglib` is not an installable package (no pyproject.toml, no __init__.py in
 chatbot/) — it is designed to be run with `raglib/chatbot/` on sys.path so
@@ -35,7 +49,6 @@ import json
 import shutil
 import tempfile
 import subprocess
-from dataclasses import fields as _dc_fields
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _RAGLIB_CHATBOT_DIR = os.path.join(_THIS_DIR, "raglib", "chatbot")
@@ -43,33 +56,18 @@ _RAGLIB_EXTRACTION_DIR = os.path.join(_THIS_DIR, "raglib", "extraction")
 if _RAGLIB_CHATBOT_DIR not in sys.path:
     sys.path.insert(0, _RAGLIB_CHATBOT_DIR)
 
-from core import (  # noqa: E402
-    ChatbotConfig, LLMConfig, EmbeddingConfig, RerankerConfig, AgenticConfig,
-    DocumentationChatbot, AgenticChatbot,
-)
+from core import ChatbotConfig, DocumentationChatbot, AgenticChatbot  # noqa: E402
 
 # Exposed for salomeAssistant.py's response-style selector.
 RESPONSE_STYLES = dict(ChatbotConfig.RESPONSE_STYLES)
 
-# Top-level scalar keys ChatbotConfig understands. Everything else in the
-# merged config.json (output_dir, use_token_chunking, modules, chunking,
-# quality, and any "_comment*" key) is extraction-only or documentation and
-# must be filtered out before building a ChatbotConfig — raglib's own loader
-# (ChatbotConfig._from_json) raises on unknown top-level keys.
-_CHATBOT_SCALAR_KEYS = {
-    "project_name", "chromadb_path", "k_standard", "k_deep_dive", "k_retrieve",
-    "deep_dive_batch_size", "top_n_after_rerank", "expansion_char_budget",
-    "temperature", "max_tokens", "bm25_enabled", "title_boost_enabled",
-    "hyde_enabled",
-}
-
-# Paths in the merged config that the "relative to this config file's
-# directory" rule (documented in config.example.json) applies to. raglib's
-# own code does NOT implement that rule itself — e.g. DocumentationChatbot
-# resolves a relative chromadb_path against raglib/chatbot/, and
-# process_docs.py resolves module dev_path/user_path against the process's
-# cwd — so every such path is made absolute here before being handed off.
-_TOP_PATH_KEYS = ("chromadb_path", "output_dir")
+# Paths that raglib documents as "may be relative" but resolves itself
+# against the process's cwd rather than the config file's own directory
+# (see CLAUDE.md's "Relative-path base mismatch" note) — expanded to
+# absolute here before either config is handed to raglib, so a saved
+# config.json stays portable (and $ENV_VAR-relative) regardless of where
+# SALOME Assistant is launched from.
+_CHATBOT_PATH_KEYS = ("chromadb_path",)
 _MODULE_PATH_KEYS = ("dev_path", "user_path", "methodology_path")
 
 
@@ -77,105 +75,79 @@ def _strip_comments(d):
     return {k: v for k, v in d.items() if not k.startswith("_")}
 
 
-def _dataclass_kwargs(cls, d):
-    """Keep only the keys `cls` (a dataclass) actually declares — silently
-    drops comment keys and any legacy/unknown field instead of raising, since
-    this config is hand-edited and shared with the extraction pipeline."""
-    valid = {f.name for f in _dc_fields(cls)}
-    return {k: v for k, v in _strip_comments(d).items() if k in valid}
-
-
-def _resolve_paths(raw, base_dir):
-    """Return a deep copy of `raw` with every documented relative path
-    resolved against `base_dir` (the config file's own directory).
-
-    Also expands shell-style environment variables (`$SMESH_ROOT_DIR`,
+def _abspath(p, base_dir):
+    """Expand shell-style environment variables (`$SMESH_ROOT_DIR`,
     `${DOCUMENTATION_ROOT_DIR}`, ...) — SALOME exports one `<MODULE>_ROOT_DIR`
-    per module (see env_launch.sh), so module paths can be written relative to
-    those instead of a filesystem location that moves between machines/builds.
-    Expansion runs before the relative/absolute check, since an expanded
-    SALOME root is always absolute. A variable left unset is not an error here
-    — expandvars leaves it as literal text, which then fails the normal
-    "path not found" check downstream with a clear enough message."""
+    per module (see env_launch.sh) — then resolve against `base_dir` if the
+    result isn't already absolute. A variable left unset is not an error
+    here — expandvars leaves it as literal text, which then fails the
+    normal "path not found" check downstream with a clear enough message."""
+    if not p:
+        return p
+    p = os.path.expandvars(p)
+    if os.path.isabs(p):
+        return p
+    return os.path.normpath(os.path.join(base_dir, p))
+
+
+def _resolve_chatbot_paths(raw, base_dir):
+    """Deep copy of a chatbot config.json dict with chromadb_path,
+    agentic.page_index_path and llm.ssl_cert_file resolved to absolute."""
     data = copy.deepcopy(raw)
 
-    def abspath(p):
-        if not p:
-            return p
-        p = os.path.expandvars(p)
-        if os.path.isabs(p):
-            return p
-        return os.path.normpath(os.path.join(base_dir, p))
-
-    for key in _TOP_PATH_KEYS:
+    for key in _CHATBOT_PATH_KEYS:
         if data.get(key):
-            data[key] = abspath(data[key])
+            data[key] = _abspath(data[key], base_dir)
 
     agentic = data.get("agentic")
     if isinstance(agentic, dict) and agentic.get("page_index_path"):
-        agentic["page_index_path"] = abspath(agentic["page_index_path"])
+        agentic["page_index_path"] = _abspath(agentic["page_index_path"], base_dir)
+
+    llm = data.get("llm")
+    if isinstance(llm, dict) and llm.get("ssl_cert_file"):
+        llm["ssl_cert_file"] = _abspath(llm["ssl_cert_file"], base_dir)
+
+    return data
+
+
+def _resolve_extraction_paths(raw, base_dir):
+    """Deep copy of an extraction config.json dict with output_dir and every
+    module dev_path/user_path/methodology_path resolved to absolute."""
+    data = copy.deepcopy(raw)
+
+    if data.get("output_dir"):
+        data["output_dir"] = _abspath(data["output_dir"], base_dir)
 
     for module in (data.get("modules") or {}).values():
         if not isinstance(module, dict):
             continue
         for key in _MODULE_PATH_KEYS:
             if module.get(key):
-                module[key] = abspath(module[key])
-
-    llm = data.get("llm")
-    if isinstance(llm, dict) and llm.get("ssl_cert_file"):
-        llm["ssl_cert_file"] = abspath(llm["ssl_cert_file"])
+                module[key] = _abspath(module[key], base_dir)
 
     return data
 
 
-def _build_chatbot_config(resolved):
-    """Build a ChatbotConfig from a merged (extraction+chatbot) config dict
-    that has already had its paths resolved to absolute."""
-    kwargs = {k: v for k, v in resolved.items() if k in _CHATBOT_SCALAR_KEYS}
-
-    llm = resolved.get("llm")
-    if isinstance(llm, dict):
-        kwargs["llm"] = LLMConfig(**_dataclass_kwargs(LLMConfig, llm))
-
-    embedding = resolved.get("embedding")
-    if isinstance(embedding, dict):
-        kwargs["embedding"] = EmbeddingConfig(**_dataclass_kwargs(EmbeddingConfig, embedding))
-
-    if "reranker" in resolved:
-        reranker = resolved["reranker"]
-        kwargs["reranker"] = (
-            RerankerConfig(**_dataclass_kwargs(RerankerConfig, reranker)) if reranker else None
-        )
-
-    if "agentic" in resolved:
-        agentic = resolved["agentic"]
-        kwargs["agentic"] = (
-            AgenticConfig(**_dataclass_kwargs(AgenticConfig, agentic)) if agentic else None
-        )
-
-    return ChatbotConfig(**kwargs)
-
-
 class RAGBackend:
     """
-    Owns the active merged config, the raglib chatbots built from it, and the
-    extraction subprocess. One instance per MainWindow.
+    Owns the active config (single file, `{"chatbot": {...}, "extraction":
+    {...}}`), the raglib chatbots built from it, and the extraction
+    subprocess. One instance per MainWindow.
     """
 
     default_save_path = os.path.join(
         os.path.expanduser("~"), ".config", "salome", "chatbot.config.json")
 
-    # Starter config shipped next to this module (config.example.json lives at
-    # the repo root in dev, and is copied next to the installed modules by the
-    # sarag build script) — used to pre-populate the GUI on first run, before
-    # the user has ever saved a config of their own.
-    _bundled_example_config = os.path.join(_THIS_DIR, "config.example.json")
+    # Starter config shipped next to this module (also at the repo root in a
+    # dev checkout; copied next to the installed modules by the sarag build
+    # script) — used to pre-populate the GUI on first run, before the user
+    # has ever saved a config of their own.
+    _bundled_example_config = os.path.join(_THIS_DIR, "chatbot.config.example.json")
 
     def __init__(self):
         self.config_path = None
-        self._raw_config = None       # as loaded/edited, relative paths intact
-        self._resolved_config = None  # same, with paths made absolute
+        self._raw_chatbot_config = None       # as loaded/edited, relative paths intact
+        self._raw_extraction_config = None    # same, for the "extraction" section
         self.config = ChatbotConfig()
 
         self._rag_chatbot = None
@@ -195,22 +167,40 @@ class RAGBackend:
 
     # ------------------------------------------------------------ config I/O
     def reload_config(self, path):
-        """Load a merged config.json from `path` as the active config."""
+        """Load `{"chatbot": {...}, "extraction": {...}}` from `path` as the
+        active config. The "chatbot" section is handed to raglib's own
+        documented loader (`ChatbotConfig.load`, see README's "Python API"
+        section); the "extraction" section feeds `run_extraction()`."""
         with open(path, encoding="utf-8") as f:
-            raw = json.load(f)
-        raw = _strip_comments(raw)
+            raw = _strip_comments(json.load(f))
+
+        raw_chatbot = raw.get("chatbot") or {}
+        raw_extraction = raw.get("extraction") or {}
 
         base_dir = os.path.dirname(os.path.abspath(path))
-        resolved = _resolve_paths(raw, base_dir)
+        resolved_chatbot = _resolve_chatbot_paths(raw_chatbot, base_dir)
 
-        self.config = _build_chatbot_config(resolved)
-        self._raw_config = raw
-        self._resolved_config = resolved
+        # ChatbotConfig.load() is raglib's own loader (see README's "Python
+        # API" section): it validates the file's keys itself and raises on
+        # anything not part of ChatbotConfig's schema. It only accepts a
+        # path on disk, so the already-path-resolved dict is written to a
+        # throwaway temp file rather than reconstructed field-by-field here.
+        fd, tmp_path = tempfile.mkstemp(suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(resolved_chatbot, f)
+            self.config = ChatbotConfig.load(tmp_path)
+        finally:
+            os.unlink(tmp_path)
+
+        self._raw_chatbot_config = raw_chatbot
+        self._raw_extraction_config = raw_extraction
         self.config_path = os.path.abspath(path)
         self._drop_chatbots()
 
     def save_and_reload(self, path, data):
-        """Write the merged config dict `data` to `path` and make it active."""
+        """Write `{"chatbot": {...}, "extraction": {...}}` to `path` and make
+        it the active config."""
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
@@ -219,7 +209,7 @@ class RAGBackend:
 
     @property
     def extraction_modules(self):
-        raw = self._raw_config or {}
+        raw = self._raw_extraction_config or {}
         modules = raw.get("modules")
         return modules if isinstance(modules, dict) else {}
 
@@ -244,7 +234,9 @@ class RAGBackend:
 
     def initialize(self):
         """Build the RAG chatbot (always) and the Agentic chatbot (only if
-        config.agentic is set and smolagents is available)."""
+        config.agentic is set and smolagents is available) — the same
+        DocumentationChatbot(config) / AgenticChatbot(config, ...) calls
+        raglib's README shows under "Python API"."""
         self._rag_chatbot = DocumentationChatbot(self.config)
         self.available_modules = self._rag_chatbot.available_modules
         self.has_reranker = self._rag_chatbot.reranker is not None
@@ -253,7 +245,11 @@ class RAGBackend:
         self._agentic_chatbot = None
         if self.config.agentic is not None:
             try:
-                self._agentic_chatbot = AgenticChatbot(self.config)
+                self._agentic_chatbot = AgenticChatbot(
+                    self.config,
+                    vectorstore=self._rag_chatbot.vectorstore,
+                    bm25_index=self._rag_chatbot.bm25_index,
+                )
             except Exception as e:
                 agentic_error = str(e)
         self.has_agentic = self._agentic_chatbot is not None
@@ -273,6 +269,10 @@ class RAGBackend:
 
     # ------------------------------------------------------------ query
     def ask(self, query, mode="rag", **params):
+        """Ask the already-initialized chatbot — chatbot.ask(...) /
+        agentic_chatbot.ask(...), exactly as shown in raglib's README. The
+        returned dict's "answer" key is the final answer handed back to the
+        user; "error" is set instead if the call failed."""
         if not self.initialized:
             return {"answer": None, "sources": [], "filters": {},
                      "error": "Not connected. Click Connect first."}
@@ -307,11 +307,12 @@ class RAGBackend:
 
     # ------------------------------------------------------------ extraction
     def run_extraction(self):
-        """Run raglib's extraction pipeline against the active config,
-        yielding output lines as they're produced, then reload the config so
-        the freshly-built database is picked up on the next Connect."""
+        """Run raglib's extraction pipeline (`process_docs.py`) against the
+        active config's "extraction" section, yielding output lines as
+        they're produced, then reload the config so the freshly-built
+        database is picked up on the next Connect."""
         if not self.config_path:
-            yield "No config.json loaded."
+            yield "No chatbot.config.json loaded."
             return
 
         tmp_dir = tempfile.mkdtemp(prefix="salome-assistant-extract-")
@@ -319,9 +320,12 @@ class RAGBackend:
             # process_docs.py resolves module/output paths against its own
             # cwd, not the config file's directory — feed it the already
             # path-resolved config instead of the one on disk.
+            base_dir = os.path.dirname(self.config_path)
+            resolved_extraction = _resolve_extraction_paths(
+                self._raw_extraction_config or {}, base_dir)
             tmp_config = os.path.join(tmp_dir, "config.resolved.json")
             with open(tmp_config, "w", encoding="utf-8") as f:
-                json.dump(self._resolved_config, f)
+                json.dump(resolved_extraction, f)
 
             script = os.path.join(_RAGLIB_EXTRACTION_DIR, "process_docs.py")
             cmd = [sys.executable, "-u", script, "--config", tmp_config]
