@@ -7,7 +7,7 @@ Tested on personal laptop: RAM 32 GB + RTX 5070 8 GB.
 ## Installation via `requirements.txt` (manual method)
 
 ```bash
-apt install python3-venv espeak-ng
+apt install python3-venv
 python3 -m venv .env
 source .env/bin/activate
 pip install -r requirements.txt
@@ -29,7 +29,7 @@ conflicts (PyQt5, transformers, etc.).
 ### System prerequisites
 
 ```bash
-sudo apt install python3-venv espeak-ng
+sudo apt install python3-venv
 ```
 
 ### 1. Create a dedicated virtual environment

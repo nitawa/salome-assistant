@@ -45,7 +45,6 @@ def main():
     app = QApplication(sys.argv)
     app.setStyleSheet("""
         QGroupBox { font-weight: bold; }
-        QTextEdit  { font-size: 14px; }
         QLineEdit  { padding: 5px; font-size: 14px; }
     """)
 

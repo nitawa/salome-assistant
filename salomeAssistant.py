@@ -8,18 +8,39 @@ database by running the extraction pipeline.
 """
 import sys
 import os
+import re
 import time
 import copy
+import json
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QTextEdit, QLineEdit, QPushButton,
+                             QHBoxLayout, QLineEdit, QPushButton,
                              QLabel, QMessageBox, QComboBox, QGroupBox, QCheckBox,
                              QSpinBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                              QDialog, QDialogButtonBox, QTabWidget, QTableWidget,
-                             QTableWidgetItem, QHeaderView)
+                             QTableWidgetItem, QHeaderView, QTabBar)
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl
+from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings, QWebEnginePage
 from rag_engine import RAGBackend, RESPONSE_STYLES
+import salome_mcp_client
 import markdown
+
+
+class ChatWebEnginePage(QWebEnginePage):
+    """Chat/browser page whose clicked links are handed to a callback
+    instead of navigating the current tab away from its content (source
+    links open in a new tab; "Run in SALOME" links trigger code execution
+    — see MainWindow._handle_chat_link)."""
+
+    def __init__(self, link_handler, parent=None):
+        super().__init__(parent)
+        self._link_handler = link_handler
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame):
+        if nav_type == QWebEnginePage.NavigationTypeLinkClicked:
+            self._link_handler(url)
+            return False
+        return super().acceptNavigationRequest(url, nav_type, is_main_frame)
 
 
 class Worker(QThread):
@@ -55,6 +76,24 @@ class Worker(QThread):
             self.failed.emit(str(e))
 
 
+class SalomeRunWorker(QThread):
+    """Runs one "Run in SALOME" code block via salome_mcp_client, off the
+    GUI thread (it's a blocking TCP round-trip to the SALOME process)."""
+    finished = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, code):
+        super().__init__()
+        self.code = code
+
+    def run(self):
+        try:
+            result = salome_mcp_client.run_python(self.code)
+            self.finished.emit(result)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class ExtractionWorker(QThread):
     """Runs the extraction pipeline subprocess, streaming output lines."""
     line = pyqtSignal(str)
@@ -74,31 +113,12 @@ class ExtractionWorker(QThread):
             self.finished.emit()
 
 
-class TTSWorker(QThread):
-    """Background thread to run text-to-speech via espeak-ng."""
-    finished = pyqtSignal()
-
-    def __init__(self, text):
-        super().__init__()
-        self.text = text
-
-    def run(self):
-        try:
-            os.system('espeak-ng "{text}"'.format(text=self.text.replace('"', '\\"')))
-        except Exception:
-            pass
-        finally:
-            try:
-                self.finished.emit()
-            except Exception:
-                pass
-
-
 class ConfigDialog(QDialog):
-    """Interactive editor for the whole merged config.json (chatbot + extraction).
-
-    Populates from the backend's current config, and on Save writes the merged
-    JSON back to disk and reloads the backend.
+    """Interactive editor for the single config.json, split into the
+    "chatbot" (query time) and "extraction" (index build time) sections
+    raglib itself keeps as two separate config files — see raglib/README.md.
+    Populates from the backend's current config, and on Save writes the
+    merged JSON back to disk and reloads the backend.
     """
 
     def __init__(self, backend, parent=None):
@@ -108,11 +128,12 @@ class ConfigDialog(QDialog):
         self.resize(680, 600)
 
         cfg = backend.config
-        raw = backend._raw_config or {}
+        raw = backend._raw_chatbot_config or {}
+        raw_extraction = backend._raw_extraction_config or {}
         emb = cfg.embedding
         llm = cfg.llm
-        chunking = raw.get("chunking", {}) if isinstance(raw.get("chunking"), dict) else {}
-        quality = raw.get("quality", {}) if isinstance(raw.get("quality"), dict) else {}
+        chunking = raw_extraction.get("chunking", {}) if isinstance(raw_extraction.get("chunking"), dict) else {}
+        quality = raw_extraction.get("quality", {}) if isinstance(raw_extraction.get("quality"), dict) else {}
 
         outer = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -122,9 +143,9 @@ class ConfigDialog(QDialog):
         gen = QWidget(); gf = QFormLayout(gen)
         self.project_name = QLineEdit(cfg.project_name)
         self.chromadb_path = QLineEdit(str(raw.get("chromadb_path", "")))
-        self.output_dir = QLineEdit(str(raw.get("output_dir", "")))
+        self.output_dir = QLineEdit(str(raw_extraction.get("output_dir", "")))
         self.use_token_chunking = QCheckBox("Use token-aware chunking (slower, more precise)")
-        self.use_token_chunking.setChecked(bool(raw.get("use_token_chunking", False)))
+        self.use_token_chunking.setChecked(bool(raw_extraction.get("use_token_chunking", False)))
         gf.addRow("Project name:", self.project_name)
         gf.addRow("ChromaDB path:", self.chromadb_path)
         gf.addRow("Extraction output dir:", self.output_dir)
@@ -182,7 +203,12 @@ class ConfigDialog(QDialog):
         self.reranker_enable.setChecked(cfg.reranker is not None)
         self.reranker_model = QLineEdit(
             cfg.reranker.model if cfg.reranker else "BAAI/bge-reranker-v2-m3")
-        self.reranker_type = QComboBox(); self.reranker_type.addItems(["local"])
+        self.reranker_type = QComboBox()
+        self.reranker_type.addItems(["cross_encoder", "late_interaction"])
+        self.reranker_type.setToolTip(
+            "cross_encoder: sentence_transformers.CrossEncoder (default).\n"
+            "late_interaction: ColBERT-style MaxSim scoring via "
+            "sentence_transformers.MultiVectorEncoder (requires sentence-transformers >= 6.0).")
         if cfg.reranker:
             self.reranker_type.setCurrentText(cfg.reranker.type)
         rkf.addRow("", self.reranker_enable)
@@ -203,13 +229,22 @@ class ConfigDialog(QDialog):
             str(raw.get("agentic", {}).get("page_index_path", "")) if isinstance(raw.get("agentic"), dict)
             else "./salome_docs_extracted/page_index.json")
         self.agentic_max_chars = self._spin(500, 50000, ag.max_chars_per_page if ag else 8000, step=500)
-        self.agentic_max_steps = self._spin(1, 20, ag.max_steps if ag else 6)
+        self.agentic_max_steps = self._spin(1, 100, ag.max_steps if ag else 6)
+        self.agentic_section_top_n = self._spin(1, 50, ag.section_top_n if ag else 5)
+        self.agentic_section_char_budget = self._spin(
+            1000, 100000, ag.section_char_budget if ag else 15000, step=1000)
+        self.agentic_debug = QCheckBox("Debug (dump agent traces to debug_traces/)")
+        self.agentic_debug.setChecked(bool(ag.debug) if ag else False)
         agf.addRow("", self.agentic_enable)
         agf.addRow("page_index.json:", self.agentic_page_index)
         agf.addRow("max_chars_per_page:", self.agentic_max_chars)
         agf.addRow("max_steps:", self.agentic_max_steps)
+        agf.addRow("section_top_n:", self.agentic_section_top_n)
+        agf.addRow("section_char_budget:", self.agentic_section_char_budget)
+        agf.addRow("", self.agentic_debug)
         self._agentic_fields = [self.agentic_page_index, self.agentic_max_chars,
-                                self.agentic_max_steps]
+                                self.agentic_max_steps, self.agentic_section_top_n,
+                                self.agentic_section_char_budget, self.agentic_debug]
         self.agentic_enable.toggled.connect(
             lambda on: [w.setEnabled(on) for w in self._agentic_fields])
         for w in self._agentic_fields:
@@ -237,15 +272,18 @@ class ConfigDialog(QDialog):
 
         # ---- Modules -------------------------------------------------------
         mw = QWidget(); mv = QVBoxLayout(mw)
-        self.modules_table = QTableWidget(0, 4)
+        self.modules_table = QTableWidget(0, 6)
         self.modules_table.setHorizontalHeaderLabels(
-            ["Name", "Description", "dev_path", "user_path"])
+            ["Name", "Description", "dev_path", "user_path", "methodology_path",
+             "url_for_sources_citation"])
         self.modules_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        for name, m in (raw.get("modules", {}) or {}).items():
+        for name, m in (raw_extraction.get("modules", {}) or {}).items():
             if not isinstance(m, dict):
                 continue
-            self._add_module_row(name, m.get("description", ""),
-                                 m.get("dev_path", ""), m.get("user_path", ""))
+            self._add_module_row(
+                name, m.get("description", ""), m.get("dev_path", ""),
+                m.get("user_path", ""), m.get("methodology_path", ""),
+                self._citation_to_text(m.get("url_for_sources_citation", "")))
         mv.addWidget(self.modules_table)
         mbtns = QHBoxLayout()
         add_btn = QPushButton("Add module"); add_btn.clicked.connect(lambda: self._add_module_row())
@@ -274,10 +312,12 @@ class ConfigDialog(QDialog):
         s = QSpinBox(); s.setRange(lo, hi); s.setSingleStep(step)
         s.setValue(int(val)); return s
 
-    def _add_module_row(self, name="", description="", dev_path="", user_path=""):
+    def _add_module_row(self, name="", description="", dev_path="", user_path="",
+                        methodology_path="", url_for_sources_citation=""):
         r = self.modules_table.rowCount()
         self.modules_table.insertRow(r)
-        for c, val in enumerate((name, description, dev_path, user_path)):
+        for c, val in enumerate((name, description, dev_path, user_path,
+                                 methodology_path, url_for_sources_citation)):
             self.modules_table.setItem(r, c, QTableWidgetItem(str(val)))
 
     def _remove_module_row(self):
@@ -289,59 +329,94 @@ class ConfigDialog(QDialog):
         item = self.modules_table.item(row, col)
         return item.text().strip() if item else ""
 
+    @staticmethod
+    def _citation_to_text(v):
+        """url_for_sources_citation may be a plain string or a {"dev": ..., "user": ...}
+        mapping (see raglib/README.md) — render a dict as compact JSON so it
+        round-trips through the table cell; a string passes through as-is."""
+        if isinstance(v, dict):
+            return json.dumps(v, ensure_ascii=False)
+        return str(v) if v else ""
+
+    @staticmethod
+    def _citation_from_text(text):
+        """Inverse of _citation_to_text: '{...}' parses back to a dict, anything
+        else is kept as a plain string; empty text omits the key entirely."""
+        text = text.strip()
+        if not text:
+            return None
+        if text.startswith("{"):
+            try:
+                return json.loads(text)
+            except ValueError:
+                pass  # not valid JSON -- fall through and keep it as a literal string
+        return text
+
     def build_config(self):
-        """Assemble the merged config dict from the widgets, preserving any
-        comment keys present in the loaded raw config."""
-        data = copy.deepcopy(self.backend._raw_config) if self.backend._raw_config else {}
+        """Assemble the {"chatbot": ..., "extraction": ...} dict from the
+        widgets — each section following raglib's own native config schema
+        for that stage — preserving any comment keys present in each
+        previously loaded section."""
+        chatbot = copy.deepcopy(self.backend._raw_chatbot_config) if self.backend._raw_chatbot_config else {}
+        extraction = copy.deepcopy(self.backend._raw_extraction_config) if self.backend._raw_extraction_config else {}
 
-        data["project_name"] = self.project_name.text().strip()
-        data["chromadb_path"] = self.chromadb_path.text().strip()
-        data["output_dir"] = self.output_dir.text().strip()
-        data["use_token_chunking"] = self.use_token_chunking.isChecked()
+        project_name = self.project_name.text().strip()
+        chatbot["project_name"] = project_name
+        extraction["project_name"] = project_name
+        chatbot["chromadb_path"] = self.chromadb_path.text().strip()
+        extraction["output_dir"] = self.output_dir.text().strip()
+        extraction["use_token_chunking"] = self.use_token_chunking.isChecked()
 
-        llm = data.get("llm") if isinstance(data.get("llm"), dict) else {}
+        llm = chatbot.get("llm") if isinstance(chatbot.get("llm"), dict) else {}
         llm["base_url"] = self.llm_base_url.text().strip()
         llm["model"] = self.llm_model.text().strip()
         llm["api_key"] = self.llm_api_key.text().strip()
         llm["ssl_cert_file"] = self.llm_ssl.text().strip() or None
-        data["llm"] = llm
+        chatbot["llm"] = llm
 
-        emb = data.get("embedding") if isinstance(data.get("embedding"), dict) else {}
+        emb = chatbot.get("embedding") if isinstance(chatbot.get("embedding"), dict) else {}
         emb["model"] = self.emb_model.text().strip()
         emb["type"] = self.emb_type.currentText()
         emb["base_url"] = self.emb_base_url.text().strip() or None
         emb["api_key"] = self.emb_api_key.text().strip() or None
-        data["embedding"] = emb
+        chatbot["embedding"] = emb
+        # embedding.model must be identical between the two configs (see
+        # raglib/README.md) — the dialog only exposes one set of embedding
+        # fields, so mirror it into the extraction config too.
+        extraction["embedding"] = dict(emb)
 
-        data["k_standard"] = self.k_standard.value()
-        data["k_deep_dive"] = self.k_deep_dive.value()
-        data["deep_dive_batch_size"] = self.deep_dive_batch_size.value()
-        data["top_n_after_rerank"] = self.top_n_after_rerank.value()
-        data["temperature"] = round(self.temperature.value(), 4)
-        data["max_tokens"] = self.max_tokens.value()
+        chatbot["k_standard"] = self.k_standard.value()
+        chatbot["k_deep_dive"] = self.k_deep_dive.value()
+        chatbot["deep_dive_batch_size"] = self.deep_dive_batch_size.value()
+        chatbot["top_n_after_rerank"] = self.top_n_after_rerank.value()
+        chatbot["temperature"] = round(self.temperature.value(), 4)
+        chatbot["max_tokens"] = self.max_tokens.value()
 
         if self.reranker_enable.isChecked():
-            data["reranker"] = {"model": self.reranker_model.text().strip(),
-                                "type": self.reranker_type.currentText()}
+            chatbot["reranker"] = {"model": self.reranker_model.text().strip(),
+                                   "type": self.reranker_type.currentText()}
         else:
-            data["reranker"] = None
+            chatbot["reranker"] = None
 
         if self.agentic_enable.isChecked():
-            data["agentic"] = {
+            chatbot["agentic"] = {
                 "page_index_path": self.agentic_page_index.text().strip(),
                 "max_chars_per_page": self.agentic_max_chars.value(),
                 "max_steps": self.agentic_max_steps.value(),
+                "section_top_n": self.agentic_section_top_n.value(),
+                "section_char_budget": self.agentic_section_char_budget.value(),
+                "debug": self.agentic_debug.isChecked(),
             }
         else:
-            data["agentic"] = None
+            chatbot["agentic"] = None
 
-        data["chunking"] = {
+        extraction["chunking"] = {
             "max_tokens": self.chunk_max_tokens.value(),
             "overlap_tokens": self.chunk_overlap_tokens.value(),
             "char_chunk_size": self.chunk_char_size.value(),
             "char_overlap": self.chunk_char_overlap.value(),
         }
-        data["quality"] = {
+        extraction["quality"] = {
             "min_score": round(self.quality_min_score.value(), 4),
             "min_word_count": self.quality_min_words.value(),
             "substantial_word_count": self.quality_substantial.value(),
@@ -352,13 +427,20 @@ class ConfigDialog(QDialog):
             name = self._cell(r, 0)
             if not name:
                 continue
-            modules[name] = {
+            module = {
                 "description": self._cell(r, 1),
                 "dev_path": self._cell(r, 2),
                 "user_path": self._cell(r, 3),
             }
-        data["modules"] = modules
-        return data
+            methodology_path = self._cell(r, 4)
+            if methodology_path:
+                module["methodology_path"] = methodology_path
+            citation = self._citation_from_text(self._cell(r, 5))
+            if citation:
+                module["url_for_sources_citation"] = citation
+            modules[name] = module
+        extraction["modules"] = modules
+        return {"chatbot": chatbot, "extraction": extraction}
 
     def _save_to(self, path):
         try:
@@ -370,8 +452,9 @@ class ConfigDialog(QDialog):
         return True
 
     def _on_save(self):
-        # Always persist to the standard user location so we never overwrite the
-        # bundled config.example.json (which may be the currently loaded file).
+        # Always persist to the standard user location so we never overwrite
+        # the bundled config.example.json (which may be the one currently
+        # loaded).
         if self._save_to(self.backend.default_save_path):
             self.accept()
 
@@ -397,7 +480,6 @@ class MainWindow(QMainWindow):
             raise EnvironmentError(f"Failed to initialize SALOME Assistant backend: {e}")
 
         self.robot_icon_path = os.path.join(os.path.dirname(__file__), "salome.jpg")
-        self.last_bot_answer_text = ""
 
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -414,13 +496,8 @@ class MainWindow(QMainWindow):
         conn_form = QFormLayout()
         self.config_path_label = QLabel(self.backend.config_path or "(raglib defaults)")
         self.config_path_label.setWordWrap(True)
-        self.browse_config_btn = QPushButton("Browse config.json...")
-        self.browse_config_btn.clicked.connect(self.handle_browse_config)
         self.edit_config_btn = QPushButton("Edit configuration...")
         self.edit_config_btn.clicked.connect(self.handle_edit_config)
-        config_btn_row = QHBoxLayout()
-        config_btn_row.addWidget(self.browse_config_btn)
-        config_btn_row.addWidget(self.edit_config_btn)
 
         self.base_url_input = QLineEdit(cfg.llm.base_url)
         self.model_input = QLineEdit(cfg.llm.model)
@@ -428,7 +505,7 @@ class MainWindow(QMainWindow):
         self.api_key_input.setEchoMode(QLineEdit.PasswordEchoOnEdit)
 
         conn_form.addRow("Config:", self.config_path_label)
-        conn_form.addRow("", config_btn_row)
+        conn_form.addRow("", self.edit_config_btn)
         conn_form.addRow("LLM base URL:", self.base_url_input)
         conn_form.addRow("Model:", self.model_input)
         conn_form.addRow("API key:", self.api_key_input)
@@ -490,8 +567,8 @@ class MainWindow(QMainWindow):
         ag = cfg.agentic
 
         self.max_steps_input = QSpinBox()
-        self.max_steps_input.setRange(1, 20)
-        self.max_steps_input.setValue(ag.max_steps if ag else 6)
+        self.max_steps_input.setRange(1, 99)
+        self.max_steps_input.setValue(ag.max_steps if ag else 10)
 
         agentic_form.addRow("Max steps:", self.max_steps_input)
         self.agentic_group.setLayout(agentic_form)
@@ -520,9 +597,29 @@ class MainWindow(QMainWindow):
         left_panel.addStretch()
 
         # --- Chat area (right) ---------------------------------------------
-        self.chat_display = QTextEdit()
-        self.chat_display.setReadOnly(True)
-        right_panel.addWidget(self.chat_display)
+        self.chat_tabs = QTabWidget()
+        self.chat_tabs.setTabsClosable(True)
+        self.chat_tabs.tabCloseRequested.connect(self._close_browser_tab)
+
+        self.chat_display = QWebEngineView()
+        self.chat_display.setPage(
+            ChatWebEnginePage(self._handle_chat_link, self.chat_display))
+        self.chat_display.settings().setAttribute(
+            QWebEngineSettings.LocalContentCanAccessFileUrls, True)
+        self.chat_display.loadFinished.connect(self._scroll_chat_to_bottom)
+        self._chat_base_url = QUrl.fromLocalFile(
+            os.path.dirname(os.path.abspath(__file__)) + os.sep)
+        self._chat_fragments = []
+        self._code_blocks = {}
+        self._code_block_counter = 0
+        self._render_chat()
+
+        self.chat_tabs.addTab(self.chat_display, "Chat")
+        # The Chat tab itself is permanent — hide its close button.
+        self.chat_tabs.tabBar().setTabButton(0, QTabBar.RightSide, None)
+        self.chat_tabs.tabBar().setTabButton(0, QTabBar.LeftSide, None)
+
+        right_panel.addWidget(self.chat_tabs)
 
         left_widget = QWidget()
         left_widget.setLayout(left_panel)
@@ -547,10 +644,6 @@ class MainWindow(QMainWindow):
         self.send_button.clicked.connect(self.handle_ask)
         self.send_button.setEnabled(False)
 
-        self.audio_button = QPushButton("Audio")
-        self.audio_button.setEnabled(False)
-        self.audio_button.clicked.connect(self.play_audio)
-
         self._thinking_timer = QTimer(self)
         self._thinking_timer.setInterval(1000)
         self._thinking_timer.timeout.connect(self._update_thinking_elapsed)
@@ -559,12 +652,10 @@ class MainWindow(QMainWindow):
 
         input_layout.addWidget(self.input_field, 1)
         input_layout.addWidget(self.send_button)
-        input_layout.addWidget(self.audio_button)
         input_layout.setAlignment(Qt.AlignTop)
         try:
             btn_h = self.input_field.sizeHint().height()
             self.send_button.setFixedHeight(btn_h)
-            self.audio_button.setFixedHeight(btn_h)
         except Exception:
             pass
         self.layout.addLayout(input_layout)
@@ -607,19 +698,6 @@ class MainWindow(QMainWindow):
         self.mode_selector.setEnabled(enabled)
 
     # ------------------------------------------------------------------ config
-    def handle_browse_config(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select raglib config.json", "", "JSON files (*.json);;All files (*)"
-        )
-        if not path:
-            return
-        try:
-            self.backend.reload_config(path)
-        except Exception as e:
-            QMessageBox.critical(self, "Config error", f"Failed to load config:\n{e}")
-            return
-        self._apply_config_to_widgets("Config reloaded. Click Connect.")
-
     def handle_edit_config(self):
         """Open the full config editor; refresh the main panel on save."""
         dlg = ConfigDialog(self.backend, self)
@@ -686,7 +764,7 @@ class MainWindow(QMainWindow):
         # Agentic availability
         self._set_agentic_available(self.backend.has_agentic)
 
-        self.chat_display.append(f"<span style='color:green'>System: {self._nl2br(msg)}</span>")
+        self._append_chat(f"<span style='color:green'>System: {self._nl2br(msg)}</span>")
 
     def on_task_failed(self, err):
         self.toggle_inputs(True)
@@ -698,7 +776,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         QMessageBox.critical(self, "Error", err)
-        self.chat_display.append(f"<span style='color:red'>Error: {self._nl2br(err)}</span>")
+        self._append_chat(f"<span style='color:red'>Error: {self._nl2br(err)}</span>")
 
     # -------------------------------------------------------------------- query
     def handle_ask(self):
@@ -709,7 +787,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Not connected", "Click Connect first.")
             return
 
-        self.chat_display.append(f"<b>You:</b> {query}")
+        self._append_chat(f"<b>You:</b> {query}")
         self.input_field.clear()
         self.toggle_inputs(False)
         self._start_thinking_timer("Thinking...")
@@ -749,9 +827,9 @@ class MainWindow(QMainWindow):
         self.input_field.setFocus()
 
         if result.get('error'):
-            self.chat_display.append(
+            self._append_chat(
                 f"<span style='color:red'>Error: {self._nl2br(result['error'])}</span>")
-            self.chat_display.append("-" * 30)
+            self._append_chat("-" * 30)
             return
 
         answer = result.get('answer') or "(empty answer)"
@@ -769,24 +847,22 @@ class MainWindow(QMainWindow):
             img_html = ""
 
         label = self.mode_selector.currentText()
-        self.chat_display.append(f"<b>Bot ({label}):</b> {img_html}{html_answer}")
-        self.last_bot_answer_text = answer
-        self.audio_button.setEnabled(True)
-        self.chat_display.append("-" * 30)
+        self._append_chat(f"<b>Bot ({label}):</b> {img_html}{html_answer}")
+        self._append_chat("-" * 30)
 
     # ------------------------------------------------------------------ extract
     def handle_build_index(self):
-        # The index is built from the same merged config.json that drives the
-        # chatbot — no separate extraction config to pick.
+        # The index is built from config.json's "extraction" section —
+        # raglib's own separate schema for process_docs.py (see raglib/README.md).
         if not self.backend.config_path:
             QMessageBox.information(
                 self, "Build index",
-                "No config.json is loaded. Use 'Browse config.json...' first.")
+                "No config.json is loaded. Use 'Edit configuration...' first.")
             return
         if not self.backend.extraction_modules:
             QMessageBox.warning(
                 self, "Build index",
-                "The loaded config has no 'modules' section to extract.\n"
+                "The config's 'extraction' section has no 'modules' to extract.\n"
                 "Add modules (with dev_path / user_path) to the config, then retry.")
             return
         confirm = QMessageBox.question(
@@ -802,7 +878,7 @@ class MainWindow(QMainWindow):
 
         self.toggle_inputs(False)
         self.status_label.setText("Building index...")
-        self.chat_display.append(
+        self._append_chat(
             "<span style='color:#888'>--- Building vector database ---</span>")
 
         self.extract_worker = ExtractionWorker(self.backend)
@@ -811,15 +887,111 @@ class MainWindow(QMainWindow):
         self.extract_worker.start()
 
     def _on_extract_line(self, line):
-        self.chat_display.append(f"<span style='color:#888'>{self._escape(line)}</span>")
+        self._append_chat(f"<span style='color:#888'>{self._escape(line)}</span>")
 
     def _on_extract_finished(self):
         self.toggle_inputs(True)
         self.status_label.setText("Index build finished. Click Connect to load it.")
-        self.chat_display.append(
+        self._append_chat(
             "<span style='color:#888'>--- Done. Click Connect to load the new index. ---</span>")
 
     # ----------------------------------------------------------------- rendering
+    def _append_chat(self, html_fragment):
+        """Add one HTML fragment (a "You:"/"Bot:"/status line) to the chat log,
+        matching QTextEdit.append()'s one-call-per-block behavior."""
+        self._chat_fragments.append(html_fragment)
+        self._render_chat()
+
+    def _render_chat(self):
+        body = "".join(f'<div class="msg">{frag}</div>' for frag in self._chat_fragments)
+        html = (
+            "<html><head><meta charset='utf-8'><style>"
+            "body{font-family:sans-serif;font-size:14px;margin:8px;}"
+            ".msg{margin:4px 0;}"
+            "pre{white-space:pre-wrap;background:#f6f8fa;padding:8px;border-radius:4px;}"
+            ".code-toolbar{margin:4px 0 0 0;}"
+            ".run-btn{display:inline-block;font-size:12px;padding:2px 8px;"
+            "border:1px solid #0a7c3b;border-radius:4px;color:#0a7c3b;"
+            "text-decoration:none;background:#eafbea;}"
+            ".run-btn:hover{background:#d3f5d3;}"
+            "</style></head><body>" + body + "</body></html>"
+        )
+        self.chat_display.setHtml(html, self._chat_base_url)
+
+    def _scroll_chat_to_bottom(self, ok=True):
+        self.chat_display.page().runJavaScript(
+            "window.scrollTo(0, document.body.scrollHeight);")
+
+    # --------------------------------------------------------- run in SALOME
+    def _handle_chat_link(self, url):
+        if url.scheme() == 'salome-run':
+            try:
+                block_id = int(url.path().lstrip('/'))
+            except ValueError:
+                return
+            self._run_code_block(block_id)
+        else:
+            self._open_link_in_new_tab(url)
+
+    def _run_code_block(self, block_id):
+        code = self._code_blocks.get(block_id)
+        if code is None:
+            return
+        self._append_chat(
+            "<span style='color:#888'><i>Running code in SALOME...</i></span>")
+        self._run_worker = SalomeRunWorker(code)
+        self._run_worker.finished.connect(self._on_run_code_finished)
+        self._run_worker.failed.connect(self._on_run_code_failed)
+        self._run_worker.start()
+
+    def _on_run_code_finished(self, result):
+        self._append_chat(self._format_run_result(result))
+
+    def _on_run_code_failed(self, err):
+        self._append_chat(
+            f"<span style='color:red'><b>SALOME:</b> {self._nl2br(err)}</span>")
+
+    @staticmethod
+    def _format_run_result(result):
+        out_style = "background:#f6f8fa;padding:8px;border-radius:4px;white-space:pre-wrap;"
+        err_style = "color:#b00;background:#fff5f5;padding:8px;border-radius:4px;white-space:pre-wrap;"
+        parts = []
+        if result.get('stdout'):
+            parts.append(f"<pre style='{out_style}'>{MainWindow._escape(result['stdout'])}</pre>")
+        if result.get('result') is not None:
+            parts.append(f"&rarr; <code>{MainWindow._escape(result['result'])}</code>")
+        if result.get('stderr'):
+            parts.append(f"<pre style='{err_style}'>{MainWindow._escape(result['stderr'])}</pre>")
+        if result.get('error'):
+            parts.append(f"<pre style='{err_style}'>{MainWindow._escape(result['error'])}</pre>")
+        if not parts:
+            parts.append("<i>(no output)</i>")
+        return "<b>SALOME:</b> " + "".join(parts)
+
+    # ------------------------------------------------------------- browser tabs
+    def _open_link_in_new_tab(self, url):
+        """Open a clicked link in a new tab next to the Chat tab."""
+        view = QWebEngineView()
+        view.setPage(ChatWebEnginePage(self._handle_chat_link, view))
+        view.titleChanged.connect(
+            lambda title, v=view: self._update_tab_title(v, title))
+        view.load(url)
+        index = self.chat_tabs.addTab(view, url.toString())
+        self.chat_tabs.setCurrentIndex(index)
+
+    def _update_tab_title(self, view, title):
+        index = self.chat_tabs.indexOf(view)
+        if index > 0:  # never rename the permanent Chat tab
+            self.chat_tabs.setTabText(index, title or "Untitled")
+
+    def _close_browser_tab(self, index):
+        if index == 0:
+            return  # the Chat tab can't be closed
+        widget = self.chat_tabs.widget(index)
+        self.chat_tabs.removeTab(index)
+        if widget is not None:
+            widget.deleteLater()
+
     @staticmethod
     def _escape(text):
         return (text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
@@ -828,20 +1000,48 @@ class MainWindow(QMainWindow):
     def _nl2br(text):
         return MainWindow._escape(text).replace("\n", "<br>")
 
-    @staticmethod
-    def _render_answer(answer):
-        """Render an answer (RST first, then Markdown) to styled HTML."""
-        html_answer = ""
-        try:
-            from docutils.core import publish_parts
-            parts = publish_parts(source=answer, writer_name='html5')
-            html_answer = parts.get('html_body', '')
-        except Exception:
-            html_answer = markdown.markdown(
-                answer, extensions=['fenced_code', 'codehilite'], output_format='html')
+    _FENCE_RE = re.compile(r'```([a-zA-Z0-9_+-]*)\n(.*?)```', re.DOTALL)
+    _RUNNABLE_LANGS = {'', 'python', 'python3', 'py'}
+    _PRE_OPEN_RE = re.compile(r'(<div class="codehilite">\s*)?<pre>(<code[^>]*>)?')
+
+    def _render_answer(self, answer):
+        """Render an LLM answer (Markdown) to styled HTML, adding a
+        "Run in SALOME" link before each runnable (Python/untagged) fenced
+        code block — clicking it round-trips through salome_mcp_client to
+        the SALOME session's PyConsole interpreter (see _handle_chat_link).
+
+        Fenced blocks are extracted from the raw markdown text (in the
+        order they appear) and matched by position to the <pre> tags
+        markdown produces for them, since that's the only way to recover
+        the exact original code from python-markdown's rendered HTML.
+        Note this assumes every rendered <pre> that appears before the
+        last fenced block came from one — a stray indented (non-fenced)
+        code block earlier in the answer would throw off that alignment.
+        """
+        fences = [(m.group(1).strip().lower(), m.group(2))
+                  for m in self._FENCE_RE.finditer(answer)]
+        html_answer = markdown.markdown(
+            answer, extensions=['fenced_code', 'codehilite', 'nl2br'], output_format='html')
         style = ('background:#f6f8fa;padding:8px;border-radius:4px;white-space:pre-wrap;')
-        html_answer = html_answer.replace('<pre><code', f'<pre style="{style}"><code')
-        html_answer = html_answer.replace('<pre>', f'<pre style="{style}">')
+
+        counter = {'i': 0}
+
+        def _inject(match):
+            i = counter['i']
+            counter['i'] += 1
+            wrapper = match.group(1) or ""
+            code_open = match.group(2) or ""
+            toolbar = ""
+            if i < len(fences) and fences[i][0] in self._RUNNABLE_LANGS:
+                block_id = self._code_block_counter
+                self._code_block_counter += 1
+                self._code_blocks[block_id] = fences[i][1]
+                toolbar = (f'<div class="code-toolbar">'
+                          f'<a href="salome-run:///{block_id}" class="run-btn">'
+                          f'&#9654; Run in SALOME</a></div>')
+            return f'{wrapper}{toolbar}<pre style="{style}">{code_open}'
+
+        html_answer = self._PRE_OPEN_RE.sub(_inject, html_answer)
         return html_answer
 
     def _render_sources(self, sources, filters):
@@ -900,30 +1100,10 @@ class MainWindow(QMainWindow):
         s = elapsed % 60
         self.status_label.setText(f"{self._thinking_prefix} {m:02d}:{s:02d}")
 
-    def play_audio(self):
-        text = getattr(self, 'last_bot_answer_text', '')
-        if not text:
-            return
-        try:
-            self.audio_button.setEnabled(False)
-            self.tts_worker = TTSWorker(text)
-            self.tts_worker.finished.connect(self._on_tts_finished)
-            self.tts_worker.start()
-        except Exception:
-            self.audio_button.setEnabled(True)
-
-    def _on_tts_finished(self):
-        try:
-            self.audio_button.setEnabled(True)
-        except Exception:
-            pass
-
-
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyleSheet("""
         QGroupBox { font-weight: bold; }
-        QTextEdit { font-size: 14px; }
         QLineEdit { padding: 5px; font-size: 14px; }
     """)
     window = MainWindow()
