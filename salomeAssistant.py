@@ -26,6 +26,43 @@ import salome_mcp_client
 import markdown
 
 
+class HistoryLineEdit(QLineEdit):
+    """QLineEdit with shell-style Up/Down prompt history recall."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._history = []
+        self._index = 0        # position in _history; len(_history) == "editing a new line"
+        self._draft = ""       # text being typed before Up was first pressed
+
+    def add_history(self, text):
+        """Record a submitted prompt and reset recall to "new line"."""
+        if not text:
+            return
+        if not self._history or self._history[-1] != text:
+            self._history.append(text)
+        self._index = len(self._history)
+        self._draft = ""
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Up:
+            if self._history and self._index > 0:
+                if self._index == len(self._history):
+                    self._draft = self.text()
+                self._index -= 1
+                self.setText(self._history[self._index])
+            return
+        if event.key() == Qt.Key_Down:
+            if self._history and self._index < len(self._history):
+                self._index += 1
+                if self._index == len(self._history):
+                    self.setText(self._draft)
+                else:
+                    self.setText(self._history[self._index])
+            return
+        super().keyPressEvent(event)
+
+
 class ChatWebEnginePage(QWebEnginePage):
     """Chat/browser page whose clicked links are handed to a callback
     instead of navigating the current tab away from its content (source
@@ -514,12 +551,23 @@ class MainWindow(QMainWindow):
 
         # --- Mode -----------------------------------------------------------
         mode_group = QGroupBox("Mode")
+        mode_vlayout = QVBoxLayout()
         mode_layout = QHBoxLayout()
         self.mode_selector = QComboBox()
         self.mode_selector.addItems(["RAG", "Agentic"])
         self.mode_selector.currentTextChanged.connect(self.update_mode_panels)
         mode_layout.addWidget(self.mode_selector)
-        mode_group.setLayout(mode_layout)
+        mode_vlayout.addLayout(mode_layout)
+        # Explains why "Agentic" is greyed out (no 'agentic' config block,
+        # deepagents not installed, or page_index.json missing) — set by
+        # _set_agentic_available() after each Connect attempt. Hidden while
+        # agentic is available or before the first Connect.
+        self.agentic_unavailable_label = QLabel("")
+        self.agentic_unavailable_label.setWordWrap(True)
+        self.agentic_unavailable_label.setStyleSheet("color: #b35c00; font-size: 11px;")
+        self.agentic_unavailable_label.setVisible(False)
+        mode_vlayout.addWidget(self.agentic_unavailable_label)
+        mode_group.setLayout(mode_vlayout)
         left_panel.addWidget(mode_group)
 
         # --- RAG parameters -------------------------------------------------
@@ -559,9 +607,13 @@ class MainWindow(QMainWindow):
         left_panel.addWidget(self.rag_group)
 
         # --- Agentic parameters --------------------------------------------
-        # Only max_steps is a real per-query override in raglib's
-        # AgenticChatbot.ask(); max_chars_per_page is baked into the agent's
-        # tools at Connect time (see ConfigDialog's Agentic tab to change it).
+        # max_steps, temperature and max_chars_per_page are all real
+        # per-query overrides in raglib's AgenticChatbot.ask() — each is
+        # re-read on every call (tools are rebuilt per-ask with whatever
+        # max_chars_per_page was passed, not fixed at Connect time). debug
+        # (agent trace dumping) is intentionally left config-only (see
+        # ConfigDialog's Agentic tab) as a persistent developer setting
+        # rather than a per-question toggle.
         self.agentic_group = QGroupBox("Agentic parameters")
         agentic_form = QFormLayout()
         ag = cfg.agentic
@@ -570,7 +622,17 @@ class MainWindow(QMainWindow):
         self.max_steps_input.setRange(1, 99)
         self.max_steps_input.setValue(ag.max_steps if ag else 10)
 
+        self.agentic_style_selector = QComboBox()
+        self.agentic_style_selector.addItems(list(RESPONSE_STYLES.keys()))
+
+        self.agentic_max_chars_input = QSpinBox()
+        self.agentic_max_chars_input.setRange(500, 50000)
+        self.agentic_max_chars_input.setSingleStep(500)
+        self.agentic_max_chars_input.setValue(ag.max_chars_per_page if ag else 8000)
+
         agentic_form.addRow("Max steps:", self.max_steps_input)
+        agentic_form.addRow("Response style:", self.agentic_style_selector)
+        agentic_form.addRow("max_chars_per_page:", self.agentic_max_chars_input)
         self.agentic_group.setLayout(agentic_form)
         left_panel.addWidget(self.agentic_group)
 
@@ -578,7 +640,13 @@ class MainWindow(QMainWindow):
         shared_group = QGroupBox("Generation")
         shared_form = QFormLayout()
         self.max_tokens_input = QSpinBox()
-        self.max_tokens_input.setRange(256, 8192)
+        # Matches ConfigDialog's own max_tokens ceiling (see self.max_tokens
+        # there) — kept in sync so both accept the same range. A max whose
+        # leading digit is low (e.g. the previous 8192) makes QSpinBox reject
+        # keystrokes for any typed value starting with a higher digit before
+        # the full number is even entered (e.g. typing "9000" gets stuck at
+        # "999"), since Qt validates digit-by-digit as you type.
+        self.max_tokens_input.setRange(256, 32000)
         self.max_tokens_input.setSingleStep(256)
         self.max_tokens_input.setValue(cfg.max_tokens)
         shared_form.addRow("Max answer tokens:", self.max_tokens_input)
@@ -635,7 +703,7 @@ class MainWindow(QMainWindow):
 
         # --- Input area -----------------------------------------------------
         input_layout = QHBoxLayout()
-        self.input_field = QLineEdit()
+        self.input_field = HistoryLineEdit()
         self.input_field.setPlaceholderText("Connect first, then ask a question...")
         self.input_field.returnPressed.connect(self.handle_ask)
         self.input_field.setEnabled(False)
@@ -672,18 +740,31 @@ class MainWindow(QMainWindow):
         self.layout.addLayout(bottom_controls)
 
         self.update_mode_panels()
-        # Agentic only becomes selectable once we know the config supports it.
-        self._set_agentic_available(False)
+        # Agentic is selectable right away — setup (deepagents, extraction) is
+        # the user's own responsibility, not something the UI should gate on.
+        self._set_agentic_available(True)
 
     # ------------------------------------------------------------------ helpers
-    def _set_agentic_available(self, available):
-        """Enable/disable the Agentic entry in the mode selector."""
+    def _set_agentic_available(self, available, reason=None):
+        """Keep the Agentic entry in the mode selector always selectable —
+        the user manages their own setup (installing deepagents, building
+        page_index.json), so the UI shouldn't block picking the mode based on
+        auto-detected state. `available`/`reason` only drive a non-blocking
+        heads-up (tooltip + label under the selector) when something looks
+        off after a Connect attempt; asking a question still surfaces a clear
+        error from the backend if agentic truly isn't usable (see
+        RAGBackend.ask())."""
         model = self.mode_selector.model()
         item = model.item(1)  # index 1 == "Agentic"
         if item is not None:
-            item.setEnabled(available)
-        if not available and self.mode_selector.currentText() == "Agentic":
-            self.mode_selector.setCurrentText("RAG")
+            item.setEnabled(True)
+            item.setToolTip("" if available else (reason or "Agentic mode may be unavailable."))
+        if available or not reason:
+            self.agentic_unavailable_label.setVisible(False)
+            self.agentic_unavailable_label.setText("")
+        else:
+            self.agentic_unavailable_label.setText(f"Agentic warning: {reason}")
+            self.agentic_unavailable_label.setVisible(True)
 
     def update_mode_panels(self, *_):
         is_rag = self.mode_selector.currentText() == "RAG"
@@ -717,6 +798,7 @@ class MainWindow(QMainWindow):
         self.max_tokens_input.setValue(cfg.max_tokens)
         if cfg.agentic:
             self.max_steps_input.setValue(cfg.agentic.max_steps)
+            self.agentic_max_chars_input.setValue(cfg.agentic.max_chars_per_page)
         self.module_selector.clear()
         self.module_selector.addItem("All")
         self.reranker_checkbox.setEnabled(False)
@@ -762,7 +844,7 @@ class MainWindow(QMainWindow):
         self.reranker_checkbox.setChecked(has_reranker)
 
         # Agentic availability
-        self._set_agentic_available(self.backend.has_agentic)
+        self._set_agentic_available(self.backend.has_agentic, reason=self.backend.agentic_error)
 
         self._append_chat(f"<span style='color:green'>System: {self._nl2br(msg)}</span>")
 
@@ -788,6 +870,7 @@ class MainWindow(QMainWindow):
             return
 
         self._append_chat(f"<b>You:</b> {query}")
+        self.input_field.add_history(query)
         self.input_field.clear()
         self.toggle_inputs(False)
         self._start_thinking_timer("Thinking...")
@@ -807,8 +890,11 @@ class MainWindow(QMainWindow):
                 'top_n': self.top_n_input.value(),
             })
         else:
+            agentic_style = RESPONSE_STYLES.get(self.agentic_style_selector.currentText(), {})
             params.update({
                 'max_steps': self.max_steps_input.value(),
+                'temperature': agentic_style.get('temperature'),
+                'max_chars_per_page': self.agentic_max_chars_input.value(),
             })
 
         self.worker = Worker(self.backend, 'query', params=params)
@@ -829,6 +915,13 @@ class MainWindow(QMainWindow):
         if result.get('error'):
             self._append_chat(
                 f"<span style='color:red'>Error: {self._nl2br(result['error'])}</span>")
+            # Even on a failed/empty answer, the agent may have retrieved
+            # useful pages before giving up — show them so the user isn't
+            # left with nothing to go on.
+            html_sources = self._render_sources(result.get('sources', []),
+                                                result.get('filters', {}))
+            if html_sources:
+                self._append_chat(html_sources)
             self._append_chat("-" * 30)
             return
 

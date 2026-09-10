@@ -14,9 +14,7 @@
       "model": "mistral",
       "api_key": "dummy",
       "_comment_api_key": "Use 'dummy' for local servers; your real key for hosted providers.",
-      "ssl_cert_file": null,
-      "timeout": null,
-      "_comment_timeout": "Seconds to wait for the LLM endpoint before raising a (catchable) timeout error. null = openai-python's own default (600s). Raise this (e.g. 300-900) for a local model on modest hardware or for Deep Dive/Agentic mode, which chain several LLM calls; a fast hosted API rarely needs it changed."
+      "ssl_cert_file": null
     },
 
     "embedding": {
