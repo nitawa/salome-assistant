@@ -155,6 +155,7 @@ class RAGBackend:
         self.available_modules = []
         self.has_reranker = False
         self.has_agentic = False
+        self.agentic_error = None    # why has_agentic is False after initialize(), if it is
         self.initialized = False
 
         for path in (self.default_save_path, self._bundled_example_config):
@@ -221,6 +222,7 @@ class RAGBackend:
         self.available_modules = []
         self.has_reranker = False
         self.has_agentic = False
+        self.agentic_error = None
         self.initialized = False
 
     # ------------------------------------------------------------ connect
@@ -243,16 +245,35 @@ class RAGBackend:
 
         agentic_error = None
         self._agentic_chatbot = None
-        if self.config.agentic is not None:
+        if self.config.agentic is None:
+            agentic_error = (
+                "No 'agentic' block in config.json. Enable it via 'Edit "
+                "configuration...' > Agentic tab (needs page_index.json, built "
+                "by running extraction after 'Enable agentic mode' is checked)."
+            )
+        else:
             try:
+                # Mirrors raglib's own chatbot.py wiring (see its --mode agentic
+                # setup): without reranker_score_fn/section_select_fn,
+                # AgenticChatbot's search_sections_tool silently falls back to
+                # its page-level branch instead of section-level retrieval —
+                # agentic.section_top_n/section_char_budget then have no
+                # effect, and results go unreranked.
+                reranker_score_fn = (
+                    self._rag_chatbot.score_against_query
+                    if self._rag_chatbot.reranker is not None else None
+                )
                 self._agentic_chatbot = AgenticChatbot(
                     self.config,
                     vectorstore=self._rag_chatbot.vectorstore,
                     bm25_index=self._rag_chatbot.bm25_index,
+                    reranker_score_fn=reranker_score_fn,
+                    section_select_fn=self._rag_chatbot.expand_sections,
                 )
             except Exception as e:
                 agentic_error = str(e)
         self.has_agentic = self._agentic_chatbot is not None
+        self.agentic_error = agentic_error
 
         self.initialized = True
 
@@ -286,12 +307,36 @@ class RAGBackend:
                     "error": "Agentic mode is not available (no 'agentic' block in "
                              "the config, or smolagents is not installed).",
                 }
-            return self._agentic_chatbot.ask(
-                query,
+            # raglib's agentic mode can have the LLM return a blank final
+            # message with no exception raised (commonly once the accumulated
+            # search/read tool history grows large) — check_grounding() finds
+            # no code blocks to flag in an empty string, so it isn't caught as
+            # a degraded/ungrounded answer either, and "error" comes back
+            # None. This is usually transient, so retry the same query a
+            # couple of times before surfacing it as an error.
+            MAX_EMPTY_ANSWER_RETRIES = 2
+            agentic_params = dict(
                 max_steps=params.get("max_steps"),
                 max_tokens=max_tokens,
                 temperature=params.get("temperature"),
+                max_chars_per_page=params.get("max_chars_per_page"),
             )
+            result = self._agentic_chatbot.ask(query, **agentic_params)
+            attempts = 1
+            while (not result.get("error") and not (result.get("answer") or "").strip()
+                   and attempts <= MAX_EMPTY_ANSWER_RETRIES):
+                result = self._agentic_chatbot.ask(query, **agentic_params)
+                attempts += 1
+            if not result.get("error") and not (result.get("answer") or "").strip():
+                result = dict(result)
+                result["error"] = (
+                    f"The assistant returned an empty answer after {attempts} attempt(s). "
+                    "This usually means the conversation the agent built up (search/read "
+                    "tool results) grew too large for the model's context window. Try "
+                    "lowering agentic.max_steps or max_chars_per_page in the config, or "
+                    "rephrase the question."
+                )
+            return result
 
         return self._rag_chatbot.ask(
             query,
